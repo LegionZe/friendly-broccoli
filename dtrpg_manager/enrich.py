@@ -79,9 +79,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         {"id": "mappack", "kind": "category", "name": "map pack", "fields": ["name"],
          "pattern": r"\bmaps? ?(?:packs?|sets?|bundles?|collections?|folios?)\b|\b(?:vtt|printable) maps?\b|\bmaps of\b|\bmaps\s*$"},
         {"id": "geomorph", "kind": "category", "name": "geomorphs", "fields": ["name", "description"],
-         "pattern": r"\bgeomorphs?\b|\bdungeon tiles?\b|\bmap tiles?\b"},
+         "pattern": r"\bgeomorphs?\b|\b(?:dungeon|map|hex) tiles?\b"},
+        {"id": "floorplans", "kind": "category", "name": "floorplans", "fields": ["name"],
+         "pattern": r"\bfloor ?plans?\b"},
+        {"id": "tokens", "kind": "category", "name": "tokens", "fields": ["name"],
+         "pattern": r"\btokens?\b|\bstandees?\b|\bpaper minis?\b"},
+        # any title naming a map (not "mapping"/"mapper"); in a real library of ~2,400
+        # titles these were all map products except "The Book of Treasure Maps"
         {"id": "maptype", "kind": "product_type", "name": "map", "fields": ["name"],
-         "pattern": r"\bbattle[- ]?maps?\b|\bmaps? ?(?:packs?|sets?|bundles?|folios?)\b|\bgeomorphs?\b|\b(?:dungeon|map) tiles?\b|\bmaps?\s*$"},
+         "pattern": r"\bbattle[- ]?maps?\b|\bmaps?\b|\bfloor ?plans?\b|\bgeomorphs?\b|\b(?:dungeon|map|hex) tiles?\b",
+         "exclude": r"\btreasure maps?\b"},
         {"id": "vtt", "kind": "tag", "name": "VTT-ready", "fields": ["name", "description"],
          "pattern": r"\bVTT\b|\bvirtual table ?top\b|\bFoundry ?VTT\b|\bRoll20\b|\bFantasy Grounds\b|\bOwlbear Rodeo\b"},
         {"id": "charsheet", "pattern": r"\bcharacter sheets?\b", "kind": "product_type", "name": "character-sheet",

@@ -705,3 +705,13 @@ def test_web_download_holds(api, lib, cfg):
     assert c.post("/api/download-holds/clear", json={"order_product_id": "1", "idx": 0}).get_json()["cleared"] == 1
     assert c.get("/api/download-holds").get_json()["items"] == []
     assert c.patch("/api/config", json={"hold_failed_hours": 48}).get_json()["hold_failed_hours"] == 48
+
+
+def test_map_rules_wider():
+    lib = _lib_with([_prod(1, "Modern Floorplans: Diner"), _prod(2, "City Map 01"),
+                     _prod(3, "DCC #46: The Book of Treasure Maps"), _prod(4, "VTT Character Token Pack"),
+                     _prod(5, "Mapping the Unknown")])
+    enrich.run_rules(lib, enrich.DEFAULT_CONFIG)
+    got = {(s["order_product_id"], s["name"]) for s in lib.suggestions({})["items"]}
+    assert {("1", "floorplans"), ("1", "map"), ("2", "map"), ("4", "tokens")} <= got
+    assert ("3", "map") not in got and not any(o == "5" for o, _ in got)
