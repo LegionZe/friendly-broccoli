@@ -4,7 +4,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const PAGE = 60;
 const SRC_LABEL = { manual: "", dtrpg: "DTRPG", rule: "rule", pdf: "PDF", llm: "AI" };
-const chip = (t, extra = "") => `<span class="chip ${esc(t.kind)} ${t.source && t.source !== "manual" ? "auto" : ""}" title="${t.source && t.source !== "manual" ? "added by " + esc(SRC_LABEL[t.source] || t.source) + (t.confidence ? ` (confidence ${(+t.confidence).toFixed(2)})` : "") : "added by you"}">${extra}${esc(t.name)}</span>`;
+const chip = (t, extra = "") => `<span class="chip ${esc(t.kind)} ${t.source && t.source !== "manual" ? "auto" : ""} filterable" data-tag-filter="${esc(t.id)}" data-label="${esc(t.kind)}: ${esc(t.name)}" title="Show all with this tag · ${t.source && t.source !== "manual" ? "added by " + esc(SRC_LABEL[t.source] || t.source) + (t.confidence ? ` (confidence ${(+t.confidence).toFixed(2)})` : "") : "added by you"}">${extra}${esc(t.name)}</span>`;
 const state = { meta: null, offset: 0, total: 0, selected: new Set(), listView: false, tagSel: new Set(), filterSel: new Set(), sTags: new Set() };
 
 async function api(path, opts = {}) {
@@ -137,10 +137,25 @@ const reload = () => { state.offset = 0; loadLibrary().catch(fail); };
 let qTimer;
 $("#f-q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(reload, 250); });
 ["#f-sort", "#f-status", "#f-type", "#f-publisher", "#f-rating", "#f-players", "#f-downloaded", "#f-fav", "#f-untagged", "#f-archived"].forEach((id) => $(id).addEventListener("change", reload));
-$("#f-clear").addEventListener("click", () => {
+function clearFilterInputs() {
   $$("#filters input, #filters select").forEach((i) => (i.type === "checkbox" ? (i.checked = false) : (i.value = i.id === "f-sort" ? "name" : "")));
-  state.tagSel.clear(); state.filterSel.clear(); renderFacets(); reload();
-});
+  state.tagSel.clear(); state.filterSel.clear();
+}
+// Click a committed tag or DTRPG category anywhere -> library filtered by it.
+// Capture phase, so it wins over the card's own "open product" click.
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-tag-filter], [data-dtrpg-filter]");
+  if (!el || e.target.closest("button")) return;
+  e.preventDefault(); e.stopPropagation();
+  clearFilterInputs();
+  if (el.dataset.tagFilter) state.tagSel.add(String(el.dataset.tagFilter));
+  else state.filterSel.add(String(el.dataset.dtrpgFilter));
+  $("#drawer").classList.add("hidden");
+  $('nav button[data-view="library"]').click();
+  renderFacets(); reload();
+  toast(`Showing: ${el.dataset.label}`);
+}, true);
+$("#f-clear").addEventListener("click", () => { clearFilterInputs(); renderFacets(); reload(); });
 $("#prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - PAGE); loadLibrary().catch(fail); });
 $("#next").addEventListener("click", () => { state.offset += PAGE; loadLibrary().catch(fail); });
 $("#view-toggle").addEventListener("click", (e) => { state.listView = !state.listView; e.target.textContent = state.listView ? "Grid view" : "List view"; loadLibrary(); });
@@ -185,7 +200,7 @@ async function openProduct(id) {
     <div class="add-tag"><select id="d-kind">${m.tag_kinds.map((k) => `<option>${k}</option>`).join("")}</select>
       <input id="d-tagname" list="tag-names" placeholder="e.g. horror, D&D 5e, Forgotten Realms"><button id="d-addtag">Add</button></div>
     <div id="d-sugg"></div>
-    ${p.dtrpg_filters.length ? `<h3>DriveThruRPG categories</h3><div class="chips">${p.dtrpg_filters.slice().sort((a, b) => ((GROUP_ORDER.indexOf(a.group) + 1 || 99) - (GROUP_ORDER.indexOf(b.group) + 1 || 99))).map((f) => `<span class="chip dtrpg">${f.group ? esc(f.group) + ": " : ""}${esc(f.name)}</span>`).join("")}</div>` : ""}
+    ${p.dtrpg_filters.length ? `<h3>DriveThruRPG categories</h3><div class="chips">${p.dtrpg_filters.slice().sort((a, b) => ((GROUP_ORDER.indexOf(a.group) + 1 || 99) - (GROUP_ORDER.indexOf(b.group) + 1 || 99))).map((f) => `<span class="chip dtrpg filterable" data-dtrpg-filter="${esc(f.id)}" data-label="${esc(f.group || "DriveThruRPG")}: ${esc(f.name)}" title="Show all in this category">${f.group ? esc(f.group) + ": " : ""}${esc(f.name)}</span>`).join("")}</div>` : ""}
     <label>Notes <textarea id="d-notes" rows="4">${esc(p.notes || "")}</textarea></label>
     <h3>Files</h3>
     <table class="files">${p.files.map((f) => `<tr><td>${esc(f.filename)}</td><td>${f.size ? (f.size / 1048576).toFixed(1) + " MB" : ""}</td>
@@ -277,7 +292,7 @@ $("#roll").addEventListener("click", async () => {
 function renderTagAdmin() {
   const tags = state.meta.tags;
   $("#tag-admin").innerHTML = tags.length ? `<table class="tag-table"><tr><th>Kind</th><th>Name</th><th>Products</th><th></th></tr>` +
-    tags.map((t) => `<tr><td>${esc(t.kind)}</td><td><input value="${esc(t.name)}" data-rename="${t.id}"></td><td>${t.count}</td>
+    tags.map((t) => `<tr><td>${esc(t.kind)}</td><td><input value="${esc(t.name)}" data-rename="${t.id}"></td><td><a href="#" data-tag-filter="${t.id}" data-label="${esc(t.kind)}: ${esc(t.name)}" title="Show these products">${t.count}</a></td>
       <td><button class="secondary" data-del="${t.id}">Delete</button></td></tr>`).join("") + "</table>" : `<p class="hint">No tags yet.</p>`;
   $$("[data-rename]").forEach((i) => i.addEventListener("change", async () => { await api(`/api/tags/${i.dataset.rename}`, { method: "PATCH", body: { name: i.value } }).catch(fail); loadMeta(); }));
   $$("[data-del]").forEach((b) => b.addEventListener("click", async () => {

@@ -627,3 +627,32 @@ def test_quick_uptodate_check(tmp_path):
     assert needs_download(f, {"checksum": "nope"}, None, use_checksum=True) == "checksum mismatch"
     assert needs_download(tmp_path / "missing.pdf", {}, None, use_checksum=False) == "missing"
     assert needs_download(f, {}, "2999-01-01T00:00:00+00:00", use_checksum=False) == "outdated"
+
+
+def test_saved_rules_still_get_new_builtin_rules(tmp_path):
+    old = {"rules": [{"id": "solo", "pattern": "alone", "kind": "tag", "name": "solo"},
+                     {"id": "zine", "pattern": "zine", "kind": "tag", "name": "zine", "disabled": True}]}
+    (tmp_path / "enrich.json").write_text(json.dumps(old))
+    conf = enrich.load_config(tmp_path)
+    by_id = {r["id"]: r for r in conf["rules"]}
+    assert by_id["solo"]["pattern"] == "alone"            # saved version wins
+    assert "battlemap" in by_id and "mappack" in by_id     # new built-ins appear
+    lib = _lib_with([_prod(1, "Zine of Battle Maps")])
+    res = enrich.run_rules(lib, conf, preview=True)
+    assert "zine" not in res["matches"]                    # disabled rule skipped
+    assert res["matches"]["battlemap"] == 1
+
+
+def test_map_rules():
+    lib = _lib_with([
+        _prod(1, "Tavern Battle Map"), _prod(2, "Castle Map Pack"), _prod(3, "Geomorphs: Caverns"),
+        _prod(4, "The Lost Mine", desc="An adventure with full-colour maps."),
+        _prod(5, "Ruins", desc="Includes battlemaps for every encounter"),
+    ])
+    enrich.run_rules(lib, enrich.DEFAULT_CONFIG)
+    got = {(s["order_product_id"], s["kind"], s["name"]) for s in lib.suggestions({})["items"]}
+    assert ("1", "category", "battlemap") in got and ("1", "product_type", "map") in got
+    assert ("2", "category", "map pack") in got and ("2", "product_type", "map") in got
+    assert ("3", "category", "geomorphs") in got
+    assert not any(o == "4" for o, _, _ in got)            # adventure merely mentioning maps
+    assert ("5", "category", "battlemap") in got and ("5", "product_type", "map") not in got

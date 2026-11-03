@@ -142,3 +142,5 @@ label.inline input:not([type=checkbox]) { width: 70px; }
 .like-chip { display: inline-flex; gap: 6px; align-items: center; background: var(--chip); color: var(--chip-ink); padding: 3px 10px; border-radius: 12px; margin: 8px 0 0; }
 .like-chip button { background: none; border: none; color: inherit; padding: 0; }
 #enrich-config { font-family: ui-monospace, monospace; font-size: 12px; }
+.chip.filterable { cursor: pointer; }
+.chip.filterable:hover { text-decoration: underline; }

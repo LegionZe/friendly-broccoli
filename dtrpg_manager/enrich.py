@@ -72,6 +72,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
          "kind": "tag", "name": "GM-less"},
         {"id": "oneshot", "pattern": r"\bone[- ]shots?\b", "kind": "tag", "name": "one-shot"},
         {"id": "zine", "pattern": r"\bzine\b", "kind": "tag", "name": "zine"},
+        # maps: titles are the reliable signal; descriptions of adventures often
+        # mention included maps, so "map" product type is set from the title only
+        {"id": "battlemap", "kind": "category", "name": "battlemap", "fields": ["name", "description"],
+         "pattern": r"\bbattle[- ]?maps?\b|\b(?:encounter|tactical|combat|gridded) maps?\b"},
+        {"id": "mappack", "kind": "category", "name": "map pack", "fields": ["name"],
+         "pattern": r"\bmaps? ?(?:packs?|sets?|bundles?|collections?|folios?)\b|\b(?:vtt|printable) maps?\b|\bmaps of\b|\bmaps\s*$"},
+        {"id": "geomorph", "kind": "category", "name": "geomorphs", "fields": ["name", "description"],
+         "pattern": r"\bgeomorphs?\b|\bdungeon tiles?\b|\bmap tiles?\b"},
+        {"id": "maptype", "kind": "product_type", "name": "map", "fields": ["name"],
+         "pattern": r"\bbattle[- ]?maps?\b|\bmaps? ?(?:packs?|sets?|bundles?|folios?)\b|\bgeomorphs?\b|\b(?:dungeon|map) tiles?\b|\bmaps?\s*$"},
+        {"id": "vtt", "kind": "tag", "name": "VTT-ready", "fields": ["name", "description"],
+         "pattern": r"\bVTT\b|\bvirtual table ?top\b|\bFoundry ?VTT\b|\bRoll20\b|\bFantasy Grounds\b|\bOwlbear Rodeo\b"},
         {"id": "charsheet", "pattern": r"\bcharacter sheets?\b", "kind": "product_type", "name": "character-sheet",
          "fields": ["name"]},
         {"id": "players", "kind": "players",
@@ -93,6 +105,11 @@ def load_config(cfg_dir: Path) -> dict[str, Any]:
     p = config_path(cfg_dir)
     if p.exists():
         user = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(user.get("rules"), list):
+            # merge by id: saved rules win; built-in rules added later still appear
+            # (switch one off with "disabled": true rather than deleting it)
+            have = {r.get("id") for r in user["rules"]}
+            user["rules"] = user["rules"] + [r for r in conf["rules"] if r["id"] not in have]
         for k, v in user.items():
             if isinstance(v, dict) and isinstance(conf.get(k), dict):
                 conf[k].update(v)
@@ -204,7 +221,7 @@ def run_rules(
 ) -> dict[str, Any]:
     """Apply regex rules. With ``preview`` nothing is written; returns per-rule match counts."""
     rules = [(r, re.compile(r["pattern"], re.I), re.compile(r["exclude"], re.I) if r.get("exclude") else None)
-             for r in conf["rules"]]
+             for r in conf["rules"] if not r.get("disabled")]
     weights = conf.get("rule_confidence", {})
     counts = {r["id"]: 0 for r, _, _ in rules}
     examples: dict[str, list[str]] = {r["id"]: [] for r, _, _ in rules}
