@@ -39,7 +39,8 @@ PRODUCTS = [
 def handler(request: httpx.Request) -> httpx.Response:
     path = request.url.path
     if path.endswith("/auth_key"):
-        assert request.url.params["applicationKey"] == "KEY"
+        assert "applicationKey" not in request.url.params  # never in the URL
+        assert json.loads(request.content)["applicationKey"] == "KEY"
         return httpx.Response(200, json={"token": "TOK", "refreshToken": "R", "refreshTokenTTL": 1})
     assert request.headers.get("Authorization") == "TOK"
     if path.endswith("/order_products"):

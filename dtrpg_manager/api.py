@@ -129,7 +129,13 @@ class DtrpgApi:
 
     # -- endpoints --------------------------------------------------------
     def authenticate(self) -> dict[str, Any]:
-        resp = self._request("POST", "auth_key", auth=False, params={"applicationKey": self._api_key})
+        # Key goes in the JSON body, not the query string, so it never appears
+        # in URLs or request logs. Verified 2026-11-03: the endpoint reads
+        # {"applicationKey": ...} from a JSON body (HTTP 496 "Invalid
+        # application key." for a bad key), but not from a form body or a
+        # Bearer header (HTTP 400 "Missing application key."). glujan/drpg
+        # and JamesSkemp/DriveThruRpg send it as ?applicationKey= instead.
+        resp = self._request("POST", "auth_key", auth=False, json={"applicationKey": self._api_key})
         if not resp.is_success:
             # Observed 2026-11-03: an invalid key returns HTTP 496 with
             # {"error": {"message": "Invalid application key.", ...}}
