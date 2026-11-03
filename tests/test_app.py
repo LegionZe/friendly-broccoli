@@ -732,3 +732,13 @@ def test_must_have_and_any_one_of():
     from werkzeug.datastructures import MultiDict
     f = _filters_from_args(MultiDict([("any_tag", "3"), ("any_tag", "4"), ("tag", "1")]))
     assert f["any_tag_ids"] == ["3", "4"] and f["tag_ids"] == ["1"]
+
+
+def test_dtrpg_counts_roll_up_to_parents():
+    lib = _lib_with([_prod(1, "A", GENRE_DARK[1:]), _prod(2, "B", GENRE_DARK), _prod(3, "C", GENRE_DARK[:1])])
+    # product 1 has only "Dark Fantasy" (child); 2 has both; 3 only "Fantasy" (parent)
+    lib.upsert_product(normalize_product(_prod(9, "Dummy", GENRE_DARK)), {})  # ensure both rows exist
+    fl = {f["name"]: f for f in lib.dtrpg_filters()}
+    assert fl["Fantasy"]["count"] == lib.search({"filter_ids": ["100"]})["total"] == 4
+    assert fl["Dark Fantasy"]["count"] == 3 and fl["Dark Fantasy"]["direct"] == 3
+    assert fl["Fantasy"]["direct"] == 3

@@ -522,14 +522,31 @@ class Library:
         ]
 
     def dtrpg_filters(self) -> list[dict[str, Any]]:
-        return [
-            dict(r)
-            for r in self._q(
-                """SELECT f.id, f.name, f.parent_id, f.group_name, COUNT(pf.order_product_id) AS count
-                   FROM dtrpg_filters f LEFT JOIN product_dtrpg_filters pf ON pf.filter_id=f.id
-                   GROUP BY f.id ORDER BY f.group_name, f.name COLLATE NOCASE"""
-            )
-        ]
+        """DTRPG categories with product counts.
+
+        ``count`` is rolled up: distinct products in the category *or any of its
+        sub-categories*, i.e. what selecting it returns (live, non-archived products,
+        matching the search defaults). ``direct`` counts only exact assignments.
+        """
+        rows = [dict(r) for r in self._q(
+            """SELECT f.id, f.name, f.parent_id, f.group_name, COUNT(pf.order_product_id) AS direct
+               FROM dtrpg_filters f LEFT JOIN product_dtrpg_filters pf ON pf.filter_id=f.id
+               GROUP BY f.id ORDER BY f.group_name, f.name COLLATE NOCASE"""
+        )]
+        parent = {r["id"]: r["parent_id"] for r in rows}
+        members: dict[str, set[str]] = {r["id"]: set() for r in rows}
+        for r in self._q(
+            """SELECT pf.order_product_id, pf.filter_id FROM product_dtrpg_filters pf
+               JOIN products p USING(order_product_id) WHERE p.removed=0 AND p.archived=0"""
+        ):
+            fid, seen = r["filter_id"], set()
+            while fid in members and fid not in seen:  # credit the category and every ancestor
+                seen.add(fid)
+                members[fid].add(r["order_product_id"])
+                fid = parent.get(fid)
+        for r in rows:
+            r["count"] = len(members[r["id"]])
+        return rows
 
     def publishers(self) -> list[dict[str, Any]]:
         return [
