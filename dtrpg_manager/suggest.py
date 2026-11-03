@@ -28,6 +28,7 @@ def suggest(
     avoid_recent: int = 10,
     rng: random.Random | None = None,
     record: bool = True,
+    similarity: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Pick ``count`` distinct products matching ``filters``.
 
@@ -37,6 +38,8 @@ def suggest(
     """
     rng = rng or random.SystemRandom()
     pool = lib.candidate_ids(filters)
+    if similarity is not None:  # "something like X": only similar products, weighted by closeness
+        pool = [c for c in pool if similarity.get(c["order_product_id"], 0) > 0]
     if not pool:
         return []
     recent = set(lib.recent_suggestions(avoid_recent)) if avoid_recent else set()
@@ -44,9 +47,10 @@ def suggest(
     pool = fresh or pool
 
     def weight(c: dict[str, Any]) -> float:
+        sim = similarity[c["order_product_id"]] ** 2 if similarity is not None else 1.0
         if not weighted:
-            return 1.0
-        w = STATUS_WEIGHT.get(c["status"], 1.0)
+            return sim
+        w = sim * STATUS_WEIGHT.get(c["status"], 1.0)
         if c["favourite"]:
             w *= 2
         if c["rating"]:

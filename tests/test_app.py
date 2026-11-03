@@ -2,6 +2,7 @@ import hashlib
 import json
 import random
 import threading
+from pathlib import Path
 
 import httpx
 import pytest
@@ -101,7 +102,7 @@ def test_safe_path_part():
 
 def test_sync_and_search(api, lib, cfg):
     res = sync_library(api, lib, cfg, progress=lambda m: None)
-    assert res == {"seen": 2, "new": 2, "removed": 0}
+    assert res == {"seen": 2, "new": 2, "removed": 0, "skipped": 0}
     assert lib.search({})["total"] == 2
     # DTRPG filter hierarchy: selecting parent "Genre" matches child "Horror"
     assert [i["name"] for i in lib.search({"filter_ids": ["10"]})["items"]] == ["Horror & Dread"]
@@ -359,3 +360,206 @@ def test_migration_adds_columns(tmp_path):
     lib = Library(db)
     lib.upsert_product(normalize_product(LIVE_SHAPE), LIVE_SHAPE)
     assert lib.product("5091002")["thumb_url"]
+
+
+def test_poison_product_is_skipped_not_fatal():
+    data = _many(40)
+    bad = 23  # 1-based position whose presence makes any page fail
+
+    def h(request):
+        if request.url.path.endswith("/auth_key"):
+            return httpx.Response(200, json={"token": "T"})
+        size, page = int(request.url.params["pageSize"]), int(request.url.params["page"])
+        lo, hi = (page - 1) * size, page * size
+        if lo < bad <= hi:
+            return httpx.Response(502, text="upstream request failed")
+        return httpx.Response(200, json=data[lo:hi])
+
+    a = DtrpgApi("K", transport=httpx.MockTransport(h), backoff=0, retries=0)
+    msgs = []
+    got = list(a.iter_products(10, progress=msgs.append, page_retries=0, retry_wait=0))
+    ids = [g["orderProductId"] for g in got]
+    assert ids == [i for i in range(1, 41) if i != bad]
+    assert a.last_skipped == [bad]
+    assert any("Skipping product #23" in m for m in msgs)
+
+
+# ---------------------------------------------------------------- enrichment
+from types import SimpleNamespace as NS
+
+from dtrpg_manager import enrich, llm
+from dtrpg_manager.related import RelatedIndex, related, series_key
+
+
+def _lib_with(products):
+    lib = Library(":memory:")
+    for raw in products:
+        lib.upsert_product(normalize_product(raw), raw)
+    return lib
+
+
+def _prod(opid, name, filters=(), desc="", publisher="Pub"):
+    return {"orderProductId": opid, "productId": opid, "name": name, "publisher": {"name": publisher},
+            "files": [], "filters": list(filters), "product": {"description": {"shortDescription": desc}}}
+
+
+GENRE_DARK = [{"filterId": 100, "parentFilterId": 10, "name": "Fantasy", "parentName": "Genre"},
+              {"filterId": 120, "parentFilterId": 100, "name": "Dark Fantasy", "parentName": "Genre"}]
+PT_ADV = [{"filterId": 2150, "parentFilterId": 20, "name": "Supplements & Expansions", "parentName": "Product Type"},
+          {"filterId": 2110, "parentFilterId": 2150, "name": "Campaigns, Adventures & Modules", "parentName": "Product Type"}]
+SYS = [{"filterId": 10146, "parentFilterId": 9999, "name": "GUMSHOE", "parentName": "Rule System"},
+       {"filterId": 9999, "parentFilterId": 30, "name": "Other systems", "parentName": "Rule System"}]
+
+
+def test_pass1_dtrpg_mapping_and_respects_removals():
+    lib = _lib_with([_prod(1, "Crypt", GENRE_DARK + PT_ADV + SYS)])
+    conf = enrich.DEFAULT_CONFIG
+    stats = enrich.apply_dtrpg(lib, conf)
+    tags = {(t["kind"], t["name"], t["source"]) for t in lib.product("1")["tags"]}
+    assert ("genre", "Dark Fantasy", "dtrpg") in tags and ("genre", "Fantasy", "dtrpg") in tags  # ancestor added
+    assert ("system", "GUMSHOE", "dtrpg") in tags
+    assert not any(n == "Other systems" for _, n, _ in tags)  # umbrella label skipped
+    assert lib.product("1")["product_type"] == "adventure"  # deepest Product Type wins
+    assert stats["tags_added"] == 3
+    # removing a DTRPG tag is remembered; re-running doesn't re-add it
+    fantasy = next(t["id"] for t in lib.product("1")["tags"] if t["name"] == "Fantasy")
+    lib.remove_tag("1", fantasy)
+    enrich.apply_dtrpg(lib, conf)
+    assert not any(t["name"] == "Fantasy" for t in lib.product("1")["tags"])
+    # a manual add upgrades provenance; manual tags survive
+    lib.add_tag("1", "genre", "Dark Fantasy")
+    assert next(t for t in lib.product("1")["tags"] if t["name"] == "Dark Fantasy")["source"] == "manual"
+
+
+def test_pass2_rules_queue_and_review():
+    lib = _lib_with([_prod(1, "Solo Delve: a 5e one-shot", desc="For 2-4 players"), _prod(2, "Plain Book")])
+    conf = enrich.load_config(Path("/nonexistent"))
+    prev = enrich.run_rules(lib, conf, preview=True)
+    assert prev["matches"]["dnd5e"] == 1 and prev["queued"] == 0
+    assert lib.suggestions({})["total"] == 0
+    res = enrich.run_rules(lib, conf)
+    names = {(s["kind"], s["name"]) for s in lib.suggestions({})["items"]}
+    assert {("system", "D&D 5e"), ("tag", "one-shot"), ("players", "2-4")} <= names
+    # running again doesn't duplicate
+    enrich.run_rules(lib, conf)
+    assert lib.suggestions({})["total"] == res["queued"]
+    # accept players + system, reject one-shot
+    ids = {(s["kind"], s["name"]): s["id"] for s in lib.suggestions({})["items"]}
+    lib.decide_suggestions({"ids": [ids[("players", "2-4")], ids[("system", "D&D 5e")]]}, accept=True)
+    lib.decide_suggestions({"ids": [ids[("tag", "one-shot")]]}, accept=False)
+    p = lib.product("1")
+    assert (p["min_players"], p["max_players"]) == (2, 4)
+    assert next(t for t in p["tags"] if t["name"] == "D&D 5e")["source"] == "rule"
+    enrich.run_rules(lib, conf)  # rejected stays rejected
+    assert not any(s["name"] == "one-shot" for s in lib.suggestions({})["items"])
+
+
+def test_enrich_config_validation(tmp_path):
+    conf = enrich.load_config(tmp_path)
+    conf["rules"].append({"id": "bad", "pattern": "(", "kind": "tag", "name": "x"})
+    with pytest.raises(ValueError, match="bad pattern"):
+        enrich.save_config(tmp_path, conf)
+    conf["rules"][-1] = {"id": "ok", "pattern": "dragon", "kind": "tag", "name": "dragons"}
+    enrich.save_config(tmp_path, conf)
+    assert enrich.load_config(tmp_path)["rules"][-1]["name"] == "dragons"
+
+
+def test_pass3_pdf_extraction(tmp_path):
+    from pypdf import PdfWriter
+    pdf = tmp_path / "book.pdf"
+    w = PdfWriter()
+    w.add_blank_page(width=200, height=200)
+    w.add_metadata({"/Title": "Book of Things"})
+    with pdf.open("wb") as fh:
+        w.write(fh)
+    lib = _lib_with([{**_prod(1, "Book"), "files": [{"index": 0, "filename": "book.pdf", "size": 10}]}])
+    lib.mark_downloaded("1", 0, str(pdf))
+    stats = enrich.extract_pdfs(lib, lambda m: None)
+    assert stats["extracted"] == 1
+    assert lib.product("1")["pages"] == 1
+    assert enrich.extract_pdfs(lib, lambda m: None)["skipped"] == 1  # unchanged file not re-read
+
+
+class FakeBatches:
+    def __init__(self, reply):
+        self.reply, self.created = reply, None
+
+    def create(self, requests):
+        self.created = requests
+        return NS(id="msgbatch_1", processing_status="in_progress")
+
+    def retrieve(self, bid):
+        return NS(processing_status="ended", request_counts=NS(processing=0, succeeded=len(self.created)))
+
+    def results(self, bid):
+        for r in self.created:
+            text = json.dumps(self.reply)
+            msg = NS(stop_reason="end_turn", content=[NS(type="text", text=text)],
+                     usage=NS(input_tokens=1000, output_tokens=100))
+            yield NS(custom_id=r["custom_id"], result=NS(type="succeeded", message=msg))
+
+
+def test_pass4_llm_batch_roundtrip():
+    lib = _lib_with([_prod(1, "Haunted Keep", desc="A gothic horror dungeon for 3-5 players")])
+    est = llm.estimate(lib)
+    assert est["products"] == 1 and est["model"] == "claude-haiku-5-5" and est["est_cost_usd_batch"] < 0.01
+    reply = {"tags": [{"kind": "genre", "name": "gothic horror", "new": True, "confidence": 0.9},
+                      {"kind": "category", "name": "dungeon", "new": True, "confidence": 0.8},
+                      {"kind": "tag", "name": "guess", "new": True, "confidence": 0.1},      # below threshold
+                      {"kind": "bogus", "name": "x", "new": False, "confidence": 0.9}],      # invalid kind
+             "product_type": "adventure", "min_players": 3, "max_players": 5}
+    fake = NS(messages=NS(batches=FakeBatches(reply)))
+    sub = llm.submit(lib, fake)
+    req = fake.messages.batches.created[0]
+    assert sub["submitted"] == 1 and req["params"]["model"] == "claude-haiku-5-5"
+    assert req["params"]["output_config"]["format"]["type"] == "json_schema"
+    assert req["params"]["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert llm.candidates(lib) == []  # pending batch is not resubmitted
+    res = llm.collect(lib, fake, "msgbatch_1")
+    assert res["status"] == "imported" and res["succeeded"] == 1
+    got = {(s["kind"], s["name"]) for s in lib.suggestions({"source": "llm"})["items"]}
+    assert got == {("genre", "gothic horror"), ("category", "dungeon"), ("product_type", "adventure"), ("players", "3-5")}
+    assert llm.candidates(lib) == []  # same input already classified
+
+
+def test_related_similarity_lines_and_links():
+    lib = _lib_with([
+        _prod(1, "Delta Green: Agent's Handbook", SYS + GENRE_DARK, "conspiracy horror agents", "Arc Dream"),
+        _prod(2, "Delta Green: Handler's Guide", SYS + GENRE_DARK, "conspiracy horror handler", "Arc Dream"),
+        _prod(3, "Night's Black Agents", SYS, "vampire spy thriller agents", "Pelgrane"),
+        _prod(4, "Sunny Meadows", [], "cheerful farming picnic", "Other"),
+        _prod(5, "Trail of Cthulhu", SYS + GENRE_DARK, "investigation horror", "Pelgrane"),
+    ])
+    idx = RelatedIndex(lib)
+    sims = idx.similar("1")
+    assert sims[0]["order_product_id"] == "2" and sims[0]["why"]
+    assert "4" not in [s["order_product_id"] for s in sims]
+    assert series_key("Delta Green: Agent's Handbook") == "delta green"
+    res = related(lib, idx, "1")
+    assert [x["order_product_id"] for x in res["same_line"]] == ["2"]
+    lib.add_link("1", "3", "related")
+    assert related(lib, idx, "3")["links"][0]["direction"] == "in"
+    with pytest.raises(ValueError):
+        lib.add_link("1", "1", "related")
+    # "something like this" restricts the random pool to similar products
+    picks = suggest(lib, {}, count=3, similarity=idx.scores_for("1"), rng=random.Random(0))
+    assert "4" not in [p["order_product_id"] for p in picks]
+
+
+def test_web_enrich_endpoints(cfg, tmp_path):
+    from dtrpg_manager.web import create_app
+
+    cfg._path = tmp_path / "config.json"
+    lib = _lib_with([_prod(1, "Crypt: a solo adventure", GENRE_DARK), _prod(2, "Tower: a solo adventure", GENRE_DARK)])
+    c = create_app(cfg, lib).test_client()
+    assert c.post("/api/enrich/dtrpg", json={}).get_json()["tags_added"] == 4
+    assert c.post("/api/enrich/rules", json={"preview": False}).get_json()["queued"] == 2
+    assert c.get("/api/suggestions").get_json()["total"] == 2
+    assert c.post("/api/suggestions/accept", json={"source": "rule"}).status_code == 400  # needs all_matching
+    assert c.post("/api/suggestions/accept", json={"source": "rule", "all_matching": True}).get_json()["decided"] == 2
+    assert c.get("/api/products/1/related").get_json()["similar"][0]["order_product_id"] == "2"
+    assert c.post("/api/products/1/links", json={"target": "2", "kind": "sequel-of"}).status_code == 200
+    assert c.post("/api/enrich/llm/submit", json={}).status_code == 400  # must confirm cost
+    conf = c.get("/api/enrich/config").get_json()
+    assert c.put("/api/enrich/config", json=conf).status_code == 200
+    assert (tmp_path / "enrich.json").exists()

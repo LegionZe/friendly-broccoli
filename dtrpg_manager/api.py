@@ -183,71 +183,106 @@ class DtrpgApi:
         progress: Callable[[str], None] | None = None,
         page_retries: int = 3,
         retry_wait: float = 20.0,
+        min_page: int = 5,
     ) -> Iterator[dict[str, Any]]:
         """Yield every product, recovering from slow or failing pages.
 
+        Position in the list is tracked as an item offset; the page number is
+        ``offset // size + 1`` with ``offset`` kept divisible by ``size``.
         Pages are requested until an empty one comes back (as glujan/drpg's
-        ``customer_products`` does), so a server-side page-size cap is harmless.
+        ``customer_products`` does); a short page is treated as a server-side
+        page-size cap. For a failing page, in order:
 
-        For a failing page, in order:
-        1. retry the same request ``page_retries`` times with growing waits
-           (transient 502/503/timeouts are common on large libraries);
-        2. retry that page once without ``getFilters`` (the slow part; drpg
-           sends 0) -- categories are re-enabled for the next page;
-        3. halve the page size (down to 5) and resume from the number of
-           products already received.
-        Duplicates are suppressed by ``orderProductId``.
+        1. retry the same request ``page_retries`` times with growing waits;
+        2. retry that page once without ``getFilters`` (categories come back on
+           for the next page);
+        3. halve the page size, down to ``min_page``;
+        4. at ``min_page``, fetch those positions one at a time and skip only
+           the ones that still fail (a single product can make the whole page
+           error, observed 2026-11-03: products 701-750 of one library).
+        After a success the page size doubles back towards ``page_size``.
+        ``self.last_skipped`` lists skipped 1-based positions.
         """
         say = progress or (lambda m: logger.info(m))
-        page = 1
-        largest_page = 0
+        target, size, offset = page_size, page_size, 0
+        cap: int | None = None  # server-side page-size limit, once detected
         seen: set[str] = set()
+        self.last_skipped: list[int] = []
         missing_filters = 0
-        say("Requesting product list (the first page can take a minute or more)")
-        while True:
-            items = None
-            err: Exception | None = None
-            for attempt in range(page_retries + 1):
+
+        def fetch(page: int, n: int, retries: int) -> tuple[list[dict[str, Any]] | None, bool, Exception | None]:
+            err = None
+            for attempt in range(retries + 1):
                 try:
-                    items = unwrap_products(self.products_page(page, page_size, archived=archived, filters=filters))
-                    break
+                    return unwrap_products(self.products_page(page, n, archived=archived, filters=filters)), True, None
                 except ApiError as e:
                     err = e
-                    if attempt < page_retries:
+                    if attempt < retries:
                         wait = retry_wait * (attempt + 1)
-                        say(f"Page {page} failed ({e}); retry {attempt + 1}/{page_retries} in {wait:.0f}s")
+                        say(f"Page {page} (size {n}) failed ({e}); retry {attempt + 1}/{retries} in {wait:.0f}s")
                         time.sleep(wait)
-            if items is None and filters:
-                say(f"Page {page} still failing; fetching it once without category data")
+            if filters:
                 try:
-                    items = unwrap_products(self.products_page(page, page_size, archived=archived, filters=False))
-                    missing_filters += len(items)
+                    return unwrap_products(self.products_page(page, n, archived=archived, filters=False)), False, None
                 except ApiError as e:
                     err = e
-            if items is None:
-                if page_size <= 5:
-                    raise ApiError(f"Giving up on page {page} after {len(seen)} products: {err}")
-                page_size = max(5, min(page_size, largest_page or page_size) // 2)
-                page = len(seen) // page_size + 1
-                say(f"Retrying with page size {page_size} from page {page}")
-                continue
-            if not items:
-                if missing_filters:
-                    say(f"{missing_filters} products were fetched without category data; sync again to fill them in")
-                return
-            largest_page = max(largest_page, len(items))
-            new = 0
+            return None, False, err
+
+        def emit(items: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
             for it in items:
                 key = str(it.get("orderProductId") or it.get("id") or id(it))
-                if key in seen:
-                    continue
-                seen.add(key)
-                new += 1
-                yield it
+                if key not in seen:
+                    seen.add(key)
+                    yield it
+
+        say("Requesting product list (the first page can take a minute or more)")
+        while True:
+            page = offset // size + 1
+            items, with_filters, err = fetch(page, size, page_retries)
+            if items is None and size > min_page:
+                new = max(min_page, size // 2)
+                while new > 1 and offset % new:
+                    new -= 1
+                size = new
+                say(f"Page still failing ({err}); retrying with page size {size}")
+                continue
+            if items is None:
+                say(f"Products {offset + 1}-{offset + size} keep failing; fetching them one at a time")
+                got_any = False
+                for pos in range(offset + 1, offset + size + 1):
+                    one, wf, e = fetch(pos, 1, 1)
+                    if one is None:
+                        self.last_skipped.append(pos)
+                        say(f"Skipping product #{pos}: {e}")
+                        continue
+                    if not one:
+                        break
+                    got_any = True
+                    missing_filters += 0 if wf else len(one)
+                    yield from emit(one)
+                if not got_any and not (self.last_skipped and self.last_skipped[-1] > offset):
+                    break  # reached the end of the list
+                offset += size
+                continue
+            if not items:
+                break
+            if not with_filters:
+                missing_filters += len(items)
+            before = len(seen)
+            yield from emit(items)
             say(f"Fetched page {page} ({len(seen)} products so far)")
-            if new == 0:  # server ignored paging -> avoid an endless loop
-                return
-            page += 1
+            if len(seen) == before:  # server ignored paging -> avoid an endless loop
+                break
+            offset += len(items)
+            if len(items) < size:  # page-size cap, or the end (next page is then empty/duplicate)
+                size = cap = len(items)
+            elif size < target and offset % (size * 2) == 0 and (cap is None or size * 2 <= cap):
+                size = min(target, size * 2)
+        if missing_filters:
+            say(f"{missing_filters} products were fetched without category data; sync again to fill them in")
+        if self.last_skipped:
+            say(f"{len(self.last_skipped)} product(s) could not be fetched (positions {self.last_skipped}); "
+                "sync again later to pick them up")
 
     def prepare_download(self, order_product_id: int | str, index: int) -> dict[str, Any]:
         """Ask the server to watermark/prepare a file and poll until it has a URL."""

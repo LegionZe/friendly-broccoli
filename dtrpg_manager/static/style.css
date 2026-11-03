@@ -116,3 +116,29 @@ details pre { white-space: pre-wrap; font-size: 11px; max-height: 300px; overflo
 }
 .facet details summary { cursor: pointer; font-size: 13px; font-weight: 600; margin: 6px 0 2px; }
 .desc { color: var(--muted); font-size: 13px; margin: 6px 0; }
+.passes { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.pass { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
+.pass h3 { margin: 0 0 4px; font-size: 14px; }
+.pass pre, #p-llm-batches { font-size: 11px; white-space: pre-wrap; max-height: 180px; overflow: auto; margin: 6px 0 0; }
+label.inline, label.check.inline { display: inline-flex; gap: 4px; align-items: center; margin: 0; }
+label.inline input { width: 70px; }
+.q-filters select, .q-filters input { width: auto; }
+.q-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.q-table td { border-top: 1px solid var(--line); padding: 4px; font-size: 13px; vertical-align: middle; }
+.q-table img { width: 28px; border-radius: 3px; }
+.q-table .conf { display: inline-block; height: 6px; background: var(--accent); border-radius: 3px; vertical-align: middle; }
+.chip.auto { border: 1px dashed currentColor; }
+.chip .src { opacity: .6; font-size: 10px; }
+.chip.suggested { background: transparent; border: 1px dashed var(--accent); color: var(--accent); }
+.rel-list { list-style: none; padding: 0; margin: 4px 0; }
+.rel-list li { display: flex; gap: 8px; align-items: center; padding: 3px 0; cursor: pointer; font-size: 13px; }
+.rel-list li:hover { color: var(--accent); }
+.rel-list img { width: 26px; border-radius: 3px; }
+.rel-list .why { color: var(--muted); font-size: 11px; }
+.rel-list .bar { flex: 0 0 50px; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.rel-list .bar span { display: block; height: 100%; background: var(--accent); }
+.link-add { display: flex; gap: 6px; margin-top: 6px; }
+.link-add select { width: 130px; }
+.like-chip { display: inline-flex; gap: 6px; align-items: center; background: var(--chip); color: var(--chip-ink); padding: 3px 10px; border-radius: 12px; margin: 8px 0 0; }
+.like-chip button { background: none; border: none; color: inherit; padding: 0; }
+#enrich-config { font-family: ui-monospace, monospace; font-size: 12px; }

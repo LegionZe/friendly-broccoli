@@ -12,10 +12,12 @@ license = { text = "MIT" }
 dependencies = [
     "httpx[http2]>=0.27",
     "flask>=3.0",
+    "pypdf>=4.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+llm = ["anthropic>=1.0"]
 
 [project.scripts]
 dtrpg-manager = "dtrpg_manager.cli:main"

@@ -136,6 +136,56 @@ def cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_enrich(args: argparse.Namespace) -> int:
+    from . import enrich, llm
+
+    cfg = _cfg(args)
+    lib = Library(cfg.db_path)
+    conf = enrich.load_config(Path(cfg._path).parent)
+    step = args.step
+    if step == "dtrpg":
+        print(enrich.apply_dtrpg(lib, conf))
+    elif step == "rules":
+        res = enrich.run_rules(lib, conf, preview=args.preview)
+        for rid, n in res["matches"].items():
+            print(f"{rid:12} {n:5}  e.g. {'; '.join(res['examples'][rid][:2])}")
+        print("preview only" if args.preview else f"queued {res['queued']} suggestions")
+    elif step == "pdf":
+        enrich.extract_pdfs(lib, print, force=args.force)
+    elif step == "llm-estimate":
+        print(json.dumps(llm.estimate(lib, args.scope, not args.no_pdf), indent=2))
+    elif step == "llm-submit":
+        est = llm.estimate(lib, args.scope, not args.no_pdf)
+        n = min(est["products"], args.limit or est["products"])
+        print(f"{n} products, estimated ≈ ${est['est_cost_usd_batch'] * (n / max(1, est['products'])):.2f} (batch pricing)")
+        if not args.yes and input("Submit? [y/N] ").strip().lower() != "y":
+            return 1
+        print(llm.submit(lib, llm.make_client(cfg.anthropic_api_key), args.scope, not args.no_pdf, args.limit))
+    elif step == "llm-collect":
+        client = llm.make_client(cfg.anthropic_api_key)
+        ids = [args.batch] if args.batch else [b["id"] for b in llm.batches(lib) if b["status"] != "imported"]
+        for bid in ids:
+            print(bid, llm.collect(lib, client, bid))
+    elif step == "llm-batches":
+        for b in llm.batches(lib):
+            print(b["id"], b["status"], b["request_count"], b["created_at"], b["summary"])
+    return 0
+
+
+def cmd_related(args: argparse.Namespace) -> int:
+    from .related import RelatedIndex, related
+
+    lib = Library(_cfg(args).db_path)
+    res = related(lib, RelatedIndex(lib), args.id, args.n)
+    print("Same line:")
+    for r in res["same_line"]:
+        print(f"  {r['name']}")
+    print("Similar:")
+    for r in res["similar"]:
+        print(f"  {r['score']:.2f}  {r.get('name')}  ({'; '.join(r['why'])})")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from .web import create_app
 
@@ -193,6 +243,22 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("import", help="import user metadata JSON")
     s.add_argument("file")
     s.set_defaults(fn=cmd_import)
+
+    s = sub.add_parser("enrich", help="automatic tagging passes")
+    s.add_argument("step", choices=["dtrpg", "rules", "pdf", "llm-estimate", "llm-submit", "llm-collect", "llm-batches"])
+    s.add_argument("--preview", action="store_true", help="rules: count matches without queuing")
+    s.add_argument("--force", action="store_true", help="pdf: re-read already processed PDFs")
+    s.add_argument("--scope", choices=["thin", "all"], default="thin", help="llm: which products")
+    s.add_argument("--no-pdf", action="store_true", help="llm: leave PDF text out of the prompt")
+    s.add_argument("--limit", type=int, help="llm-submit: at most this many products")
+    s.add_argument("--yes", action="store_true", help="llm-submit: don't ask for confirmation")
+    s.add_argument("--batch", help="llm-collect: a specific batch id")
+    s.set_defaults(fn=cmd_enrich)
+
+    s = sub.add_parser("related", help="show related products")
+    s.add_argument("id", help="orderProductId")
+    s.add_argument("-n", type=int, default=12)
+    s.set_defaults(fn=cmd_related)
 
     s = sub.add_parser("serve", help="run the web UI")
     s.add_argument("--host", default="127.0.0.1")

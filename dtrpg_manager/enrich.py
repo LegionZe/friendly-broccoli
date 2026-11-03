@@ -1,0 +1,292 @@
+"""Automatic tag enrichment, passes 1-3 (pass 4, the Haiku classifier, is in llm.py).
+
+1. ``apply_dtrpg``   -- map DriveThruRPG categories onto user tags (applied directly,
+                        source ``dtrpg``; deterministic).
+2. ``run_rules``     -- regex rules over title / publisher / description / PDF text
+                        (queued as suggestions for review, source ``rule:<id>``).
+3. ``extract_pdfs``  -- read page count, PDF metadata and the first pages' text of
+                        each product's main downloaded PDF (feeds passes 2 and 4).
+
+Invariants: manual tags are never removed or downgraded; anything removed or
+rejected by the user is remembered and not re-added (see Library.remove_tag /
+Library.suggest).
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import logging
+import re
+from pathlib import Path
+from typing import Any, Callable
+
+from .db import PRODUCT_TYPES, TAG_KINDS, Library, now
+
+logger = logging.getLogger(__name__)
+
+# Group names, parent/child structure and labels below are those observed in a
+# live order_products response (2026-11-03): parentName is one of
+# "Genre", "Rule System", "Product Type", "Format".
+DEFAULT_CONFIG: dict[str, Any] = {
+    "dtrpg": {
+        # DTRPG top-level group -> user tag kind ("product_type" sets the field; null = ignore)
+        "groups": {"Genre": "genre", "Rule System": "system", "Product Type": "product_type", "Format": None},
+        # also add every ancestor category (Dark Fantasy -> Fantasy)
+        "include_ancestors": True,
+        # umbrella labels that carry no information as tags
+        "skip": [
+            "Miscellaneous", "Other systems", "Other unique systems", "Custom Systems", "Generic",
+            "Cross-genre/Multi-genre", "Roleplaying", "Supplements & Expansions", "Core Rulebooks",
+            "Media & Software", "Maps & Miniatures", "Setting Guides",
+        ],
+        # rename/merge DTRPG labels, e.g. {"Storyteller / Storytelling": "World of Darkness"}
+        "rename": {},
+        # DTRPG Product Type label -> product_type value (deepest match wins)
+        "product_types": {
+            "Core Rulebooks": "core-rules", "All-in-One Rulebooks": "core-rules",
+            "Quickstarts & Starter Sets": "core-rules", "Live Action (LARP) Core": "core-rules",
+            "Supplements & Expansions": "supplement",
+            "Campaigns, Adventures & Modules": "adventure",
+            "Setting Guides": "setting", "Campaign World Books": "setting", "Other Locations": "setting",
+            "Maps & Miniatures": "map", "Visual Aids": "map", "Cards, Props, & Visual Aids": "tool",
+            "Stock Art": "art", "RPG Fiction": "fiction", "Magazines & Zines": "other",
+            "Media & Software": "tool",
+        },
+    },
+    # Pass 2. fields: name, publisher, description, pdf_text. kind: a tag kind,
+    # "product_type", or "players" (pattern must capture min and optionally max).
+    "rules": [
+        {"id": "dnd5e", "pattern": r"\b5e\b|\bD&D\s*5|\bdnd\s*5e?\b|\bSRD\s*5\.\d|fifth edition (?:fantasy|compatible)",
+         "kind": "system", "name": "D&D 5e"},
+        {"id": "pf2e", "pattern": r"\bPathfinder\s*(?:2e|second edition|2nd edition)\b|\bPF2e?\b",
+         "kind": "system", "name": "Pathfinder 2e"},
+        {"id": "osr", "pattern": r"\bOSR\b|old[- ]school (?:renaissance|revival)", "kind": "tag", "name": "OSR"},
+        {"id": "pbta", "pattern": r"powered by the apocalypse|\bPbtA\b", "kind": "system", "name": "PbtA"},
+        {"id": "fitd", "pattern": r"forged in the dark|\bFitD\b", "kind": "system", "name": "Forged in the Dark"},
+        {"id": "solo", "pattern": r"\bsolo (?:play|game|rpg|adventure|journal)|single[- ]player|\bsolitaire\b",
+         "kind": "tag", "name": "solo"},
+        {"id": "gmless", "pattern": r"\bGM[- ]?less\b|\bno GM\b|without a (?:GM|game ?master)",
+         "kind": "tag", "name": "GM-less"},
+        {"id": "oneshot", "pattern": r"\bone[- ]shots?\b", "kind": "tag", "name": "one-shot"},
+        {"id": "zine", "pattern": r"\bzine\b", "kind": "tag", "name": "zine"},
+        {"id": "charsheet", "pattern": r"\bcharacter sheets?\b", "kind": "product_type", "name": "character-sheet",
+         "fields": ["name"]},
+        {"id": "players", "kind": "players",
+         "pattern": r"\b(?:for\s+)?(\d{1,2})\s*(?:-|–|to)\s*(\d{1,2})\s+players\b|\bfor\s+(\d{1,2})\s+players\b"},
+    ],
+    "rule_confidence": {"name": 0.8, "publisher": 0.7, "description": 0.7, "pdf_text": 0.5},
+}
+
+DEFAULT_FIELDS = ["name", "description", "pdf_text"]
+
+
+# -- config -------------------------------------------------------------------
+def config_path(cfg_dir: Path) -> Path:
+    return cfg_dir / "enrich.json"
+
+
+def load_config(cfg_dir: Path) -> dict[str, Any]:
+    conf = copy.deepcopy(DEFAULT_CONFIG)
+    p = config_path(cfg_dir)
+    if p.exists():
+        user = json.loads(p.read_text(encoding="utf-8"))
+        for k, v in user.items():
+            if isinstance(v, dict) and isinstance(conf.get(k), dict):
+                conf[k].update(v)
+            else:
+                conf[k] = v
+    return conf
+
+
+def save_config(cfg_dir: Path, conf: dict[str, Any]) -> None:
+    validate_config(conf)
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    config_path(cfg_dir).write_text(json.dumps(conf, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def validate_config(conf: dict[str, Any]) -> None:
+    kinds = set(TAG_KINDS) | {"product_type", "players"}
+    for kind in conf["dtrpg"]["groups"].values():
+        if kind is not None and kind not in kinds:
+            raise ValueError(f"dtrpg.groups: unknown kind {kind!r}")
+    for v in conf["dtrpg"]["product_types"].values():
+        if v not in PRODUCT_TYPES:
+            raise ValueError(f"dtrpg.product_types: {v!r} is not one of {PRODUCT_TYPES}")
+    ids = set()
+    for r in conf["rules"]:
+        if r.get("id") in ids or not r.get("id"):
+            raise ValueError(f"rule ids must be unique and non-empty: {r.get('id')!r}")
+        ids.add(r["id"])
+        if r.get("kind") not in kinds:
+            raise ValueError(f"rule {r['id']}: unknown kind {r.get('kind')!r}")
+        if r["kind"] != "players" and not r.get("name"):
+            raise ValueError(f"rule {r['id']}: name is required")
+        if r["kind"] == "product_type" and r["name"] not in PRODUCT_TYPES:
+            raise ValueError(f"rule {r['id']}: {r['name']!r} is not a product type")
+        try:
+            re.compile(r["pattern"], re.I)
+        except re.error as e:
+            raise ValueError(f"rule {r['id']}: bad pattern: {e}") from e
+
+
+# -- pass 1 -------------------------------------------------------------------
+def apply_dtrpg(lib: Library, conf: dict[str, Any], opids: list[str] | None = None) -> dict[str, int]:
+    d = conf["dtrpg"]
+    groups, skip, rename, ptypes = d["groups"], set(d["skip"]), d["rename"], d["product_types"]
+    flt = {r["id"]: dict(r) for r in lib._q("SELECT id, name, parent_id, group_name FROM dtrpg_filters")}
+
+    def chain(fid: str) -> list[dict[str, Any]]:
+        out, seen = [], set()
+        while fid in flt and fid not in seen:
+            seen.add(fid)
+            out.append(flt[fid])
+            if not d["include_ancestors"]:
+                break
+            fid = flt[fid]["parent_id"]
+        return out  # leaf first
+
+    rows = lib._q("SELECT order_product_id, filter_id FROM product_dtrpg_filters")
+    by_product: dict[str, list[str]] = {}
+    for r in rows:
+        if opids is None or r["order_product_id"] in opids:
+            by_product.setdefault(r["order_product_id"], []).append(r["filter_id"])
+    stats = {"products": 0, "tags_added": 0, "product_types_set": 0}
+    current_type = {r[0]: r[1] for r in lib._q("SELECT order_product_id, product_type FROM product_meta")}
+    for opid, fids in by_product.items():
+        stats["products"] += 1
+        best_type: tuple[int, str] | None = None
+        for fid in fids:
+            for depth, f in enumerate(reversed(chain(fid))):  # root first -> depth grows to leaf
+                kind = groups.get(f["group_name"] or "")
+                if not kind:
+                    continue
+                if kind == "product_type":
+                    if f["name"] in ptypes and (best_type is None or depth >= best_type[0]):
+                        best_type = (depth, ptypes[f["name"]])
+                    continue
+                if f["name"] in skip:
+                    continue
+                name = rename.get(f["name"], f["name"])
+                if lib.has_tag(opid, kind, name) or lib.is_rejected(opid, kind, name):
+                    continue
+                lib.add_tag(opid, kind, name, source="dtrpg", confidence=1.0)
+                stats["tags_added"] += 1
+        if best_type and not current_type.get(opid) and not lib.is_rejected(opid, "product_type", best_type[1]):
+            lib.update_meta(opid, {"product_type": best_type[1]})
+            stats["product_types_set"] += 1
+    return stats
+
+
+# -- pass 2 -------------------------------------------------------------------
+def _texts(lib: Library, opids: list[str] | None) -> list[dict[str, Any]]:
+    rows = lib._q(
+        """SELECT p.order_product_id, p.name, p.publisher, p.description, t.text AS pdf_text
+           FROM products p LEFT JOIN product_text t USING(order_product_id) WHERE p.removed=0"""
+    )
+    return [dict(r) for r in rows if opids is None or r["order_product_id"] in opids]
+
+
+def _players(m: re.Match) -> str | None:
+    nums = [int(g) for g in m.groups() if g]
+    if not nums or any(n < 1 or n > 30 for n in nums):
+        return None
+    lo, hi = (nums[0], nums[1]) if len(nums) > 1 else (nums[0], nums[0])
+    return f"{min(lo, hi)}-{max(lo, hi)}"
+
+
+def run_rules(
+    lib: Library, conf: dict[str, Any], *, preview: bool = False, opids: list[str] | None = None
+) -> dict[str, Any]:
+    """Apply regex rules. With ``preview`` nothing is written; returns per-rule match counts."""
+    rules = [(r, re.compile(r["pattern"], re.I)) for r in conf["rules"]]
+    weights = conf.get("rule_confidence", {})
+    counts = {r["id"]: 0 for r, _ in rules}
+    examples: dict[str, list[str]] = {r["id"]: [] for r, _ in rules}
+    queued = 0
+    for p in _texts(lib, opids):
+        for rule, rx in rules:
+            hit = None
+            for field in rule.get("fields", DEFAULT_FIELDS):
+                text = p.get(field)
+                if text and (m := rx.search(text)):
+                    hit = (field, m)
+                    break
+            if not hit:
+                continue
+            field, m = hit
+            name = _players(m) if rule["kind"] == "players" else rule["name"]
+            if not name or lib.is_rejected(p["order_product_id"], rule["kind"], name):
+                continue
+            if rule["kind"] in TAG_KINDS and lib.has_tag(p["order_product_id"], rule["kind"], name):
+                continue
+            counts[rule["id"]] += 1
+            if len(examples[rule["id"]]) < 5:
+                examples[rule["id"]].append(f"{p['name']} [{field}: …{m.group(0)}…]")
+            if not preview:
+                queued += lib.suggest(
+                    p["order_product_id"], rule["kind"], name, f"rule:{rule['id']}", weights.get(field, 0.6)
+                )
+    return {"matches": counts, "examples": examples, "queued": queued, "preview": preview}
+
+
+# -- pass 3 -------------------------------------------------------------------
+PDF_PAGES = 3
+PDF_CHARS = 8000
+
+
+def extract_pdfs(
+    lib: Library, log: Callable[[str], None] = print, *, force: bool = False, cancel: Any = None
+) -> dict[str, int]:
+    try:
+        from pypdf import PdfReader
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError("pypdf is not installed: pip install pypdf") from e
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+
+    rows = lib._q(
+        """SELECT order_product_id, local_path, size FROM files
+           WHERE local_path IS NOT NULL AND lower(local_path) LIKE '%.pdf' ORDER BY order_product_id, size DESC"""
+    )
+    main: dict[str, str] = {}
+    for r in rows:  # largest PDF per product = main book
+        main.setdefault(r["order_product_id"], r["local_path"])
+    done = {r[0]: (r[1], r[2]) for r in lib._q("SELECT order_product_id, path, mtime FROM product_text")}
+    stats = {"pdfs": len(main), "extracted": 0, "skipped": 0, "errors": 0}
+    log(f"{len(main)} products have a downloaded PDF")
+    for i, (opid, path) in enumerate(main.items(), 1):
+        if cancel is not None and cancel.is_set():
+            break
+        pth = Path(path)
+        if not pth.exists():
+            stats["skipped"] += 1
+            continue
+        mtime = pth.stat().st_mtime
+        if not force and done.get(opid) == (path, mtime):
+            stats["skipped"] += 1
+            continue
+        pages = meta = text = err = None
+        try:
+            reader = PdfReader(str(pth))
+            if reader.is_encrypted:
+                reader.decrypt("")
+            pages = len(reader.pages)
+            info = reader.metadata or {}
+            meta = {k: str(info.get(k)) for k in ("/Title", "/Subject", "/Keywords", "/Author") if info.get(k)}
+            parts = []
+            for page in reader.pages[:PDF_PAGES]:
+                parts.append(page.extract_text() or "")
+            text = re.sub(r"\s+", " ", " ".join(parts)).strip()[:PDF_CHARS]
+            stats["extracted"] += 1
+        except Exception as e:  # malformed PDFs are common; record and move on
+            err = f"{type(e).__name__}: {e}"[:300]
+            stats["errors"] += 1
+        lib._x(
+            """INSERT OR REPLACE INTO product_text
+               (order_product_id, path, mtime, pages, meta_json, text, error, extracted_at) VALUES (?,?,?,?,?,?,?,?)""",
+            (opid, path, mtime, pages, json.dumps(meta) if meta else None, text, err, now()),
+        )
+        if i % 25 == 0:
+            log(f"{i}/{len(main)} PDFs read")
+    log(f"PDF pass finished: {stats}")
+    return stats

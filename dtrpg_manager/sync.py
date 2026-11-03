@@ -41,8 +41,10 @@ def sync_library(api: DtrpgApi, lib: Library, cfg: Config, progress: Callable[[s
                 rec["archived"] = 1
             new += lib.upsert_product(rec, raw)
             seen.add(rec["order_product_id"])
-    removed = lib.mark_removed_except(seen, cfg.include_archived)
-    summary = {"seen": len(seen), "new": new, "removed": removed}
+    skipped = len(getattr(api, "last_skipped", []) or [])
+    # Only flag products as removed after a complete listing.
+    removed = 0 if skipped else lib.mark_removed_except(seen, cfg.include_archived)
+    summary = {"seen": len(seen), "new": new, "removed": removed, "skipped": skipped}
     progress(f"Sync complete: {summary}")
     return summary
 

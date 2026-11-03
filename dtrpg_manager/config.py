@@ -32,6 +32,7 @@ class Config:
     page_size: int = 50
     fetch_filters: bool = True  # getFilters=1: DTRPG categories; slower server-side
     request_timeout: int = 120  # seconds to wait for an API response
+    anthropic_api_key: str = ""  # pass 4 (Claude Haiku tag suggestions); or ANTHROPIC_API_KEY
 
     _path: Path | None = field(default=None, repr=False, compare=False)
     _file_key: str = field(default="", repr=False, compare=False)
@@ -73,4 +74,7 @@ class Config:
         k = self.api_key
         d["api_key"] = ("••••" + (k[-4:] if len(k) >= 16 else "")) if k else ""
         d["api_key_set"] = bool(self.api_key)
+        a = self.anthropic_api_key
+        d["anthropic_api_key"] = ("••••" + (a[-4:] if len(a) >= 16 else "")) if a else ""
+        d["anthropic_api_key_set"] = bool(a or os.environ.get("ANTHROPIC_API_KEY"))
         return d

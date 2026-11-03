@@ -10,9 +10,11 @@ from typing import Any
 
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 
+from . import enrich, llm
 from .api import DtrpgApi
+from .related import RelatedIndex, related
 from .config import Config
-from .db import PRODUCT_TYPES, STATUSES, TAG_KINDS, Library
+from .db import LINK_KINDS, PRODUCT_TYPES, STATUSES, TAG_KINDS, Library
 from .suggest import suggest
 from .sync import JobManager, download_many, sync_library
 
@@ -42,6 +44,8 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
     app.config["cfg"] = cfg
     lib = lib or Library(cfg.db_path)
     jobs = JobManager()
+    rel_index = RelatedIndex(lib)
+    cfg_dir = Path(cfg._path).parent if cfg._path else Path(cfg.db_path).parent
 
     @app.before_request
     def csrf_guard() -> None:
@@ -71,7 +75,7 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
     @app.get("/api/meta")
     def meta():
         return jsonify(
-            statuses=STATUSES, tag_kinds=TAG_KINDS, product_types=PRODUCT_TYPES,
+            statuses=STATUSES, tag_kinds=TAG_KINDS, product_types=PRODUCT_TYPES, link_kinds=LINK_KINDS,
             tags=lib.tags(), dtrpg_filters=lib.dtrpg_filters(), publishers=lib.publishers(),
             stats=lib.stats(), config=cfg.public(),
         )
@@ -137,8 +141,10 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
     @app.get("/api/suggest")
     def api_suggest():
         f = _filters_from_args(request.args)
+        like = request.args.get("like")
         picks = suggest(
             lib, f,
+            similarity=rel_index.scores_for(like) if like else None,
             count=min(int(request.args.get("count", 1)), 20),
             weighted=request.args.get("weighted", "1") != "0",
             avoid_recent=int(request.args.get("avoid_recent", 10)),
@@ -207,11 +213,12 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
     def set_config():
         body = request.get_json()
         allowed = {"api_key", "library_path", "omit_publisher", "validate_checksums",
-                   "include_archived", "threads", "page_size", "fetch_filters", "request_timeout", "download_delay"}
+                   "include_archived", "threads", "page_size", "fetch_filters", "request_timeout", "download_delay",
+                   "anthropic_api_key"}
         for k, v in body.items():
             if k not in allowed:
                 raise ValueError(f"Unknown setting {k}")
-            if k == "api_key" and (not v or v.startswith("••••")):
+            if k in ("api_key", "anthropic_api_key") and (not v or v.startswith("••••")):
                 continue
             setattr(app.config["cfg"], k, type(getattr(cfg, k))(v))
         cfg.save()
@@ -244,5 +251,92 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
     @app.post("/api/import")
     def import_json():
         return jsonify(imported=lib.import_metadata(request.get_json()))
+
+    # -- relationships ---------------------------------------------------------
+    @app.get("/api/products/<opid>/related")
+    def api_related(opid: str):
+        return jsonify(related(lib, rel_index, opid, int(request.args.get("n", 12))))
+
+    @app.post("/api/products/<opid>/links")
+    def add_link(opid: str):
+        body = request.get_json()
+        lib.add_link(opid, str(body["target"]), body.get("kind", "related"), body.get("note"))
+        return jsonify(lib.links(opid))
+
+    @app.delete("/api/products/<opid>/links/<target>/<kind>")
+    def remove_link(opid: str, target: str, kind: str):
+        lib.remove_link(opid, target, kind)
+        return jsonify(lib.links(opid))
+
+    # -- enrichment ---------------------------------------------------------------
+    @app.get("/api/enrich/config")
+    def get_enrich_config():
+        return jsonify(enrich.load_config(cfg_dir))
+
+    @app.put("/api/enrich/config")
+    def put_enrich_config():
+        enrich.save_config(cfg_dir, request.get_json())
+        return jsonify(enrich.load_config(cfg_dir))
+
+    @app.post("/api/enrich/dtrpg")
+    def api_enrich_dtrpg():
+        return jsonify(enrich.apply_dtrpg(lib, enrich.load_config(cfg_dir)))
+
+    @app.post("/api/enrich/rules")
+    def api_enrich_rules():
+        preview = bool(request.get_json().get("preview"))
+        return jsonify(enrich.run_rules(lib, enrich.load_config(cfg_dir), preview=preview))
+
+    @app.post("/api/enrich/pdf")
+    def api_enrich_pdf():
+        if jobs.running("pdf"):
+            return jsonify(error="PDF reading is already running"), 409
+        force = bool(request.get_json().get("force"))
+        return jsonify(job=jobs.start("pdf", lambda log, cancel: enrich.extract_pdfs(lib, log, force=force, cancel=cancel)))
+
+    @app.get("/api/enrich/llm/estimate")
+    def api_llm_estimate():
+        return jsonify(llm.estimate(lib, request.args.get("scope", "thin"), request.args.get("pdf", "1") == "1"))
+
+    @app.post("/api/enrich/llm/submit")
+    def api_llm_submit():
+        body = request.get_json()
+        if not body.get("confirm"):
+            raise ValueError("Submitting costs money: send confirm=true after reviewing the estimate")
+        client = llm.make_client(cfg.anthropic_api_key)
+        return jsonify(llm.submit(lib, client, body.get("scope", "thin"), bool(body.get("pdf", True)), body.get("limit")))
+
+    @app.get("/api/enrich/llm/batches")
+    def api_llm_batches():
+        return jsonify(llm.batches(lib))
+
+    @app.post("/api/enrich/llm/batches/<bid>/collect")
+    def api_llm_collect(bid: str):
+        return jsonify(llm.collect(lib, llm.make_client(cfg.anthropic_api_key), bid))
+
+    # -- review queue -------------------------------------------------------------
+    def _sugg_filters(src) -> dict:
+        return {k: src.get(k) for k in ("status", "source", "kind", "min_confidence", "order_product_id")}
+
+    @app.get("/api/suggestions")
+    def api_suggestions():
+        f = _sugg_filters(request.args)
+        return jsonify(lib.suggestions(f, min(int(request.args.get("limit", 100)), 500), int(request.args.get("offset", 0))))
+
+    @app.post("/api/suggestions/<action>")
+    def api_decide(action: str):
+        if action not in ("accept", "reject"):
+            abort(404)
+        body = request.get_json()
+        f = _sugg_filters(body)
+        if body.get("ids"):
+            f["ids"] = body["ids"]
+        elif not body.get("all_matching"):
+            raise ValueError("Pass ids, or all_matching=true with filters")
+        return jsonify(decided=lib.decide_suggestions(f, accept=action == "accept"))
+
+    @app.errorhandler(RuntimeError)
+    def runtime_error(e: RuntimeError):
+        return jsonify(error=str(e)), 400
 
     return app

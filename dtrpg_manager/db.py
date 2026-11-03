@@ -84,10 +84,66 @@ CREATE TABLE IF NOT EXISTS suggestions (
     suggested_at     TEXT NOT NULL
 );
 
+-- Suggested classifications awaiting review (passes 2-4). kind is a tag kind,
+-- or 'product_type' / 'players' (value holds the type or "min-max").
+CREATE TABLE IF NOT EXISTS tag_suggestions (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_product_id TEXT NOT NULL REFERENCES products(order_product_id) ON DELETE CASCADE,
+    kind             TEXT NOT NULL,
+    name             TEXT NOT NULL,
+    source           TEXT NOT NULL,
+    confidence       REAL NOT NULL DEFAULT 0.5,
+    is_new           INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    created_at       TEXT NOT NULL,
+    UNIQUE (order_product_id, kind, name COLLATE NOCASE)
+);
+CREATE INDEX IF NOT EXISTS ix_sugg_status ON tag_suggestions(status, source);
+
+-- Text pulled from the main downloaded PDF (pass 3)
+CREATE TABLE IF NOT EXISTS product_text (
+    order_product_id TEXT PRIMARY KEY REFERENCES products(order_product_id) ON DELETE CASCADE,
+    path             TEXT NOT NULL,
+    mtime            REAL NOT NULL,
+    pages            INTEGER,
+    meta_json        TEXT,
+    text             TEXT,
+    error            TEXT,
+    extracted_at     TEXT NOT NULL
+);
+
+-- Haiku batch jobs (pass 4)
+CREATE TABLE IF NOT EXISTS llm_batches (
+    id            TEXT PRIMARY KEY,
+    created_at    TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    request_count INTEGER NOT NULL,
+    status        TEXT NOT NULL,
+    imported_at   TEXT,
+    summary_json  TEXT
+);
+CREATE TABLE IF NOT EXISTS llm_done (
+    order_product_id TEXT PRIMARY KEY REFERENCES products(order_product_id) ON DELETE CASCADE,
+    content_hash     TEXT NOT NULL,
+    batch_id         TEXT,
+    done_at          TEXT NOT NULL
+);
+
+-- Manual relationships between products
+CREATE TABLE IF NOT EXISTS product_links (
+    a     TEXT NOT NULL REFERENCES products(order_product_id) ON DELETE CASCADE,
+    b     TEXT NOT NULL REFERENCES products(order_product_id) ON DELETE CASCADE,
+    kind  TEXT NOT NULL,
+    note  TEXT,
+    PRIMARY KEY (a, b, kind)
+);
+
 CREATE INDEX IF NOT EXISTS ix_products_publisher ON products(publisher);
 CREATE INDEX IF NOT EXISTS ix_tags_kind ON tags(kind);
 """
 
+TAG_SOURCES_AUTO = ("dtrpg", "rule", "pdf", "llm")
+LINK_KINDS = ("related", "same-line", "supplement-of", "requires", "sequel-of")
 STATUSES = ("unread", "reading", "read", "want-to-play", "playing", "played", "shelved")
 TAG_KINDS = ("genre", "category", "system", "setting", "tag")
 PRODUCT_TYPES = (
@@ -120,6 +176,11 @@ class Library:
         for col in ("thumb_url", "description", "slug"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
+        pt_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(product_tags)")}
+        if "source" not in pt_cols:
+            self.conn.execute("ALTER TABLE product_tags ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+        if "confidence" not in pt_cols:
+            self.conn.execute("ALTER TABLE product_tags ADD COLUMN confidence REAL")
         self.conn.commit()
 
     def close(self) -> None:
@@ -256,19 +317,160 @@ class Library:
                 return row["id"]
             return self.conn.execute("INSERT INTO tags (kind, name) VALUES (?,?)", (kind, name)).lastrowid
 
-    def add_tag(self, opid: str, kind: str, name: str) -> int:
+    def add_tag(
+        self, opid: str, kind: str, name: str, source: str = "manual", confidence: float | None = None
+    ) -> int:
+        """Attach a tag. A manual add upgrades an automatic tag to manual;
+        an automatic add never overwrites an existing tag's provenance."""
         tid = self.get_or_create_tag(kind, name)
-        self._x("INSERT OR IGNORE INTO product_tags VALUES (?,?)", (opid, tid))
+        if source == "manual":
+            self._x(
+                """INSERT INTO product_tags (order_product_id, tag_id, source, confidence) VALUES (?,?, 'manual', NULL)
+                   ON CONFLICT(order_product_id, tag_id) DO UPDATE SET source='manual', confidence=NULL""",
+                (opid, tid),
+            )
+        else:
+            self._x(
+                "INSERT OR IGNORE INTO product_tags (order_product_id, tag_id, source, confidence) VALUES (?,?,?,?)",
+                (opid, tid, source, confidence),
+            )
         return tid
 
     def remove_tag(self, opid: str, tag_id: int) -> None:
+        """Remove a tag and remember the decision so automatic passes don't re-add it."""
+        row = self._q("SELECT kind, name FROM tags WHERE id=?", (tag_id,))
         self._x("DELETE FROM product_tags WHERE order_product_id=? AND tag_id=?", (opid, tag_id))
+        if row:
+            self._x(
+                """INSERT INTO tag_suggestions (order_product_id, kind, name, source, confidence, status, created_at)
+                   VALUES (?,?,?, 'manual', 0, 'rejected', ?)
+                   ON CONFLICT(order_product_id, kind, name) DO UPDATE SET status='rejected'""",
+                (opid, row[0]["kind"], row[0]["name"], now()),
+            )
 
     def bulk_tag(self, opids: list[str], kind: str, name: str) -> int:
         tid = self.get_or_create_tag(kind, name)
         with self._lock, self.conn:
-            self.conn.executemany("INSERT OR IGNORE INTO product_tags VALUES (?,?)", [(o, tid) for o in opids])
+            self.conn.executemany(
+                """INSERT INTO product_tags (order_product_id, tag_id, source) VALUES (?,?, 'manual')
+                   ON CONFLICT(order_product_id, tag_id) DO UPDATE SET source='manual', confidence=NULL""",
+                [(o, tid) for o in opids],
+            )
         return tid
+
+    # -- suggestions (review queue) -----------------------------------------
+    def is_rejected(self, opid: str, kind: str, name: str) -> bool:
+        return bool(self._q(
+            "SELECT 1 FROM tag_suggestions WHERE order_product_id=? AND kind=? AND name=? COLLATE NOCASE AND status='rejected'",
+            (opid, kind, name),
+        ))
+
+    def has_tag(self, opid: str, kind: str, name: str) -> bool:
+        return bool(self._q(
+            """SELECT 1 FROM product_tags pt JOIN tags t ON t.id=pt.tag_id
+               WHERE pt.order_product_id=? AND t.kind=? AND t.name=? COLLATE NOCASE""",
+            (opid, kind, name),
+        ))
+
+    def suggest(
+        self, opid: str, kind: str, name: str, source: str, confidence: float, is_new: bool = False
+    ) -> bool:
+        """Queue a suggestion unless it is already applied or was decided. Returns True if queued/updated."""
+        name = name.strip()
+        if not name:
+            return False
+        if kind in TAG_KINDS and self.has_tag(opid, kind, name):
+            return False
+        confidence = max(0.0, min(1.0, float(confidence)))
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO tag_suggestions (order_product_id, kind, name, source, confidence, is_new, created_at)
+                   VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(order_product_id, kind, name) DO UPDATE SET
+                       confidence=MAX(tag_suggestions.confidence, excluded.confidence),
+                       source=CASE WHEN excluded.confidence > tag_suggestions.confidence
+                                   THEN excluded.source ELSE tag_suggestions.source END
+                   WHERE tag_suggestions.status='pending'""",
+                (opid, kind, name, source, confidence, 1 if is_new else 0, now()),
+            )
+            return cur.rowcount > 0
+
+    def suggestions(self, f: dict[str, Any], limit: int = 200, offset: int = 0) -> dict[str, Any]:
+        where, args = self._sugg_where(f)
+        total = self._q(f"SELECT COUNT(*) FROM tag_suggestions s WHERE {where}", args)[0][0]
+        rows = self._q(
+            f"""SELECT s.*, p.name AS product_name, p.publisher, p.thumb_url FROM tag_suggestions s
+                JOIN products p USING(order_product_id) WHERE {where}
+                ORDER BY s.confidence DESC, p.name COLLATE NOCASE LIMIT ? OFFSET ?""",
+            (*args, limit, offset),
+        )
+        counts = {r[0]: r[1] for r in self._q(
+            "SELECT source, COUNT(*) FROM tag_suggestions WHERE status='pending' GROUP BY source")}
+        return {"total": total, "items": [dict(r) for r in rows], "pending_by_source": counts}
+
+    @staticmethod
+    def _sugg_where(f: dict[str, Any]) -> tuple[str, list[Any]]:
+        clauses, args = ["s.status=?"], [f.get("status") or "pending"]
+        if src := f.get("source"):
+            clauses.append("s.source LIKE ?")
+            args.append(src + "%")
+        if kind := f.get("kind"):
+            clauses.append("s.kind=?")
+            args.append(kind)
+        if (mc := f.get("min_confidence")) not in (None, ""):
+            clauses.append("s.confidence>=?")
+            args.append(float(mc))
+        if opid := f.get("order_product_id"):
+            clauses.append("s.order_product_id=?")
+            args.append(str(opid))
+        if ids := f.get("ids"):
+            clauses.append(f"s.id IN ({','.join('?' * len(ids))})")
+            args += [int(i) for i in ids]
+        return " AND ".join(clauses), args
+
+    def decide_suggestions(self, f: dict[str, Any], accept: bool) -> int:
+        where, args = self._sugg_where({**f, "status": "pending"})
+        rows = self._q(f"SELECT * FROM tag_suggestions s WHERE {where}", args)
+        for r in rows:
+            if accept:
+                self._apply_suggestion(dict(r))
+            self._x("UPDATE tag_suggestions SET status=? WHERE id=?", ("accepted" if accept else "rejected", r["id"]))
+        return len(rows)
+
+    def _apply_suggestion(self, r: dict[str, Any]) -> None:
+        opid, kind, name = r["order_product_id"], r["kind"], r["name"]
+        if kind in TAG_KINDS:
+            self.add_tag(opid, kind, name, source=r["source"].split(":")[0], confidence=r["confidence"])
+        elif kind == "product_type" and name in PRODUCT_TYPES:
+            self.update_meta(opid, {"product_type": name})
+        elif kind == "players":
+            lo, _, hi = name.partition("-")
+            self.update_meta(opid, {"min_players": int(lo), "max_players": int(hi or lo)})
+
+    # -- links ------------------------------------------------------------------
+    def add_link(self, a: str, b: str, kind: str, note: str | None = None) -> None:
+        if kind not in LINK_KINDS:
+            raise ValueError(f"kind must be one of {LINK_KINDS}")
+        if a == b:
+            raise ValueError("cannot link a product to itself")
+        self._x("INSERT OR REPLACE INTO product_links VALUES (?,?,?,?)", (a, b, kind, note))
+
+    def remove_link(self, a: str, b: str, kind: str) -> None:
+        self._x("DELETE FROM product_links WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND kind=?", (a, b, b, a, kind))
+
+    def links(self, opid: str) -> list[dict[str, Any]]:
+        rows = self._q(
+            """SELECT l.kind, l.note, l.a, l.b, p.order_product_id, p.name, p.publisher, p.thumb_url
+               FROM product_links l JOIN products p ON p.order_product_id = CASE WHEN l.a=? THEN l.b ELSE l.a END
+               WHERE l.a=? OR l.b=?""",
+            (opid, opid, opid),
+        )
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["direction"] = "out" if r["a"] == opid else "in"
+            out.append(d)
+        return out
 
     def delete_tag(self, tag_id: int) -> None:
         self._x("DELETE FROM tags WHERE id=?", (tag_id,))
@@ -400,11 +602,13 @@ class Library:
         marks = ",".join("?" * len(ids))
         tags: dict[str, list] = {i: [] for i in ids}
         for r in self._q(
-            f"""SELECT pt.order_product_id, t.id, t.kind, t.name FROM product_tags pt JOIN tags t ON t.id=pt.tag_id
+            f"""SELECT pt.order_product_id, t.id, t.kind, t.name, pt.source, pt.confidence FROM product_tags pt JOIN tags t ON t.id=pt.tag_id
                 WHERE pt.order_product_id IN ({marks}) ORDER BY t.kind, t.name""",
             ids,
         ):
-            tags[r["order_product_id"]].append({"id": r["id"], "kind": r["kind"], "name": r["name"]})
+            tags[r["order_product_id"]].append(
+                {"id": r["id"], "kind": r["kind"], "name": r["name"], "source": r["source"], "confidence": r["confidence"]}
+            )
         flts: dict[str, list] = {i: [] for i in ids}
         for r in self._q(
             f"""SELECT pf.order_product_id, f.id, f.name, f.group_name FROM product_dtrpg_filters pf
@@ -427,6 +631,8 @@ class Library:
         item = dict(rows[0])
         item["raw"] = json.loads(item.pop("raw_json") or "null")
         item["files"] = self.files_for(opid)
+        pt = self._q("SELECT pages FROM product_text WHERE order_product_id=?", (opid,))
+        item["pages"] = pt[0]["pages"] if pt else None
         self._attach_tags([item])
         return item
 
@@ -461,7 +667,7 @@ class Library:
         keep = ("order_product_id", "product_id", "name", "publisher", "status", "rating", "favourite",
                 "exclude_random", "product_type", "min_players", "max_players", "notes")
         return [
-            {**{k: i.get(k) for k in keep}, "tags": [{"kind": t["kind"], "name": t["name"]} for t in i["tags"]]}
+            {**{k: i.get(k) for k in keep}, "tags": [{"kind": t["kind"], "name": t["name"], "source": t["source"]} for t in i["tags"]]}
             for i in res["items"]
         ]
 
@@ -474,6 +680,6 @@ class Library:
                 continue
             self.update_meta(opid, {k: r[k] for k in META_FIELDS if k in r})
             for t in r.get("tags", []):
-                self.add_tag(opid, t["kind"], t["name"])
+                self.add_tag(opid, t["kind"], t["name"], source=t.get("source") or "manual")
             n += 1
         return n
