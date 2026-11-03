@@ -104,7 +104,8 @@
         <label>API key <small>(“Library App Keys” at <a href="https://www.drivethrurpg.com/en/account/settings" target="_blank" rel="noopener">drivethrurpg.com/en/account/settings</a>)</small>
           <input name="api_key" type="password" autocomplete="off"></label>
         <label>Download folder <input name="library_path"></label>
-        <label>Parallel downloads <input name="threads" type="number" min="1" max="8"></label>
+        <label>Parallel downloads <small>(1 recommended — DriveThruRPG returns HTTP 503 when hit with several at once)</small> <input name="threads" type="number" min="1" max="4"></label>
+        <label>Seconds between downloads <input name="download_delay" type="number" min="0" max="60" step="0.5"></label>
         <label class="check"><input name="omit_publisher" type="checkbox"> Don't create publisher folders</label>
         <label class="check"><input name="validate_checksums" type="checkbox"> Validate MD5 checksums</label>
         <label class="check"><input name="include_archived" type="checkbox"> Sync archived products too</label>

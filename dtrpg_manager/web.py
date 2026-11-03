@@ -156,7 +156,7 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
         if jobs.running("sync"):
             return jsonify(error="A sync is already running"), 409
 
-        def run(log):
+        def run(log, cancel):
             with DtrpgApi(cfg.api_key, read_timeout=cfg.request_timeout) as api:
                 return sync_library(api, lib, cfg, log)
 
@@ -172,8 +172,16 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
             files = [f for f in files if f["idx"] in idx]
         if not files:
             return jsonify(error="Nothing to download"), 400
+        if jobs.running("download"):
+            return jsonify(error="A download is already running; stop it first or wait"), 409
         force = bool(body.get("force"))
-        return jsonify(job=jobs.start("download", lambda log: download_many(cfg, lib, files, log, force)))
+        return jsonify(job=jobs.start("download", lambda log, cancel: download_many(cfg, lib, files, log, force, cancel)))
+
+    @app.post("/api/jobs/<jid>/cancel")
+    def cancel_job(jid: str):
+        if not jobs.cancel(jid):
+            abort(404)
+        return jsonify(ok=True)
 
     @app.get("/api/jobs")
     def api_jobs():
@@ -199,7 +207,7 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
     def set_config():
         body = request.get_json()
         allowed = {"api_key", "library_path", "omit_publisher", "validate_checksums",
-                   "include_archived", "threads", "page_size", "fetch_filters", "request_timeout"}
+                   "include_archived", "threads", "page_size", "fetch_filters", "request_timeout", "download_delay"}
         for k, v in body.items():
             if k not in allowed:
                 raise ValueError(f"Unknown setting {k}")

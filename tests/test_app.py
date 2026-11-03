@@ -1,6 +1,7 @@
 import hashlib
 import json
 import random
+import threading
 
 import httpx
 import pytest
@@ -218,3 +219,73 @@ def test_server_page_cap_does_not_truncate():
 
     a = DtrpgApi("K", transport=httpx.MockTransport(h), backoff=0)
     assert len(list(a.iter_products(50, progress=lambda m: None))) == 23
+
+
+def _dl_setup(api, lib, cfg):
+    sync_library(api, lib, cfg, progress=lambda m: None)
+    cfg.download_delay = 0
+    return [f for f in lib.all_files() if f["order_product_id"] == "1"]
+
+
+def test_download_retries_503_with_fresh_link(api, lib, cfg):
+    from dtrpg_manager.sync import download_many
+
+    files = _dl_setup(api, lib, cfg)
+    responses = iter([httpx.Response(503, headers={"Retry-After": "7", "server": "cloudflare"}, text="busy"),
+                      httpx.Response(200, content=PDF)])
+    http = httpx.Client(transport=httpx.MockTransport(lambda r: next(responses)))
+    slept, msgs = [], []
+    res = download_many(cfg, lib, files, msgs.append, api=api, http=http, sleep=slept.append)
+    assert res["downloaded"] == 1 and res["failed"] == 0
+    assert 7.0 in slept  # honoured Retry-After
+    assert any("server=cloudflare" in m for m in msgs)  # response detail surfaced
+
+
+def test_download_circuit_breaker_stops(api, lib, cfg):
+    from dtrpg_manager.sync import download_many
+
+    sync_library(api, lib, cfg, progress=lambda m: None)
+    cfg.download_delay = 0
+    files = [dict(f, idx=i, filename=f"f{i}.pdf", checksum=None) for i, f in enumerate(lib.all_files() * 10)]
+    hits = []
+
+    def always_503(r):
+        hits.append(r)
+        return httpx.Response(503, text="down")
+
+    msgs = []
+    res = download_many(cfg, lib, files, msgs.append, api=api, http=httpx.Client(transport=httpx.MockTransport(always_503)),
+                        sleep=lambda s: None, max_attempts=2, breaker_threshold=3)
+    assert res["failed"] == 6  # 3 -> pause -> 3 more -> stop
+    assert len(hits) == 12  # stopped instead of trying all 30 files
+    assert any("stopped" in m for m in msgs)
+
+
+def test_single_download_job(api, lib, cfg):
+    from dtrpg_manager.web import create_app
+
+    sync_library(api, lib, cfg, progress=lambda m: None)
+    client = create_app(cfg, lib).test_client()
+    import dtrpg_manager.web as web
+    started = threading.Event()
+    release = threading.Event()
+    orig = web.download_many
+    web.download_many = lambda *a, **k: (started.set(), release.wait(5))
+    try:
+        assert client.post("/api/download", json={"all": True}).status_code == 200
+        started.wait(5)
+        assert client.post("/api/download", json={"all": True}).status_code == 409
+        job = client.get("/api/jobs").get_json()[0]["id"]
+        assert client.post(f"/api/jobs/{job}/cancel", json={}).status_code == 200
+    finally:
+        release.set()
+        web.download_many = orig
+
+
+def test_httpx_logging_silenced(cfg, tmp_path, monkeypatch):
+    import logging
+    from dtrpg_manager import cli
+
+    monkeypatch.setattr(cli, "cmd_export", lambda a: 0)
+    cli.main(["--config", str(tmp_path / "c.json"), "export", "x.json"])
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING

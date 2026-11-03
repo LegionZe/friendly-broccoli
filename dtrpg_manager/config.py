@@ -27,7 +27,8 @@ class Config:
     omit_publisher: bool = False
     validate_checksums: bool = True
     include_archived: bool = False
-    threads: int = 3
+    threads: int = 1  # parallel downloads; >1 makes HTTP 503s from DTRPG more likely
+    download_delay: float = 2.0  # seconds between downloads
     page_size: int = 50
     fetch_filters: bool = True  # getFilters=1: DTRPG categories; slower server-side
     request_timeout: int = 120  # seconds to wait for an API response

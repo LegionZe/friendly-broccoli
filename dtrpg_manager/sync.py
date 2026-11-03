@@ -82,6 +82,33 @@ def needs_download(path: Path, file_row: dict[str, Any], file_last_modified: str
     return None
 
 
+class DownloadHTTPError(ApiError):
+    """Non-2xx response from the file (watermark/CDN) server."""
+
+    def __init__(self, status: int, detail: str, retry_after: float | None) -> None:
+        super().__init__(f"HTTP {status} from download server: {detail}")
+        self.status = status
+        self.retry_after = retry_after
+        self.detail = detail
+
+
+def _retry_after(resp: httpx.Response) -> float | None:
+    try:
+        return max(0.0, float(resp.headers.get("Retry-After", "")))
+    except ValueError:
+        return None
+
+
+def _describe(resp: httpx.Response) -> str:
+    """Short, credential-free description of an error response for the job log."""
+    resp.read()
+    body = " ".join(resp.text[:300].split())
+    hdrs = ", ".join(
+        f"{k}={resp.headers[k]}" for k in ("server", "retry-after", "cf-ray", "content-type") if k in resp.headers
+    )
+    return f"{resp.reason_phrase} [{hdrs}] {body}"
+
+
 def download_file(
     api: DtrpgApi,
     lib: Library,
@@ -106,7 +133,8 @@ def download_file(
     h = hashlib.md5()
     try:
         with http.stream("GET", info["url"], follow_redirects=True) as resp:
-            resp.raise_for_status()
+            if not resp.is_success:
+                raise DownloadHTTPError(resp.status_code, _describe(resp), _retry_after(resp))
             with tmp.open("wb") as fh:
                 for chunk in resp.iter_bytes(1 << 16):
                     fh.write(chunk)
@@ -132,26 +160,37 @@ def download_file(
 
 
 # -- background jobs for the web UI ---------------------------------------
+class JobCancelled(Exception):
+    pass
+
+
 class JobManager:
     def __init__(self) -> None:
         self._jobs: dict[str, dict[str, Any]] = {}
+        self._cancel: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
-    def start(self, kind: str, fn: Callable[[Callable[[str], None]], Any]) -> str:
+    def start(self, kind: str, fn: Callable[..., Any]) -> str:
+        """``fn(log, cancel_event)`` runs in a background thread."""
         jid = uuid.uuid4().hex[:10]
         job = {"id": jid, "kind": kind, "state": "running", "log": [], "started": now(), "result": None}
+        cancel = threading.Event()
         with self._lock:
             self._jobs[jid] = job
+            self._cancel[jid] = cancel
 
         def log(msg: str) -> None:
             with self._lock:
-                job["log"].append(msg)
-                del job["log"][:-200]
+                job["log"].append(f"{datetime.now().strftime('%H:%M:%S')} {msg}")
+                del job["log"][:-300]
 
         def run() -> None:
             try:
-                job["result"] = fn(log)
-                job["state"] = "done"
+                job["result"] = fn(log, cancel)
+                job["state"] = "cancelled" if cancel.is_set() else "done"
+            except JobCancelled:
+                log("Stopped by user")
+                job["state"] = "cancelled"
             except Exception as e:  # surfaced to the UI
                 logger.exception("Job %s failed", jid)
                 log(f"ERROR: {e}")
@@ -161,36 +200,135 @@ class JobManager:
         threading.Thread(target=run, daemon=True).start()
         return jid
 
+    def cancel(self, jid: str) -> bool:
+        with self._lock:
+            ev = self._cancel.get(jid)
+        if ev:
+            ev.set()
+        return ev is not None
+
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [dict(j, log=list(j["log"][-30:])) for j in reversed(self._jobs.values())][:20]
+            return [dict(j, log=list(j["log"][-40:])) for j in reversed(self._jobs.values())][:20]
 
     def running(self, kind: str) -> bool:
         with self._lock:
             return any(j["kind"] == kind and j["state"] == "running" for j in self._jobs.values())
 
 
+RETRYABLE = {429, 500, 502, 503, 504}
+
+
 def download_many(
-    cfg: Config, lib: Library, files: list[dict[str, Any]], log: Callable[[str], None], force: bool = False
+    cfg: Config,
+    lib: Library,
+    files: list[dict[str, Any]],
+    log: Callable[[str], None],
+    force: bool = False,
+    cancel: threading.Event | None = None,
+    *,
+    api: DtrpgApi | None = None,
+    http: httpx.Client | None = None,
+    sleep: Callable[[float], None] | None = None,
+    max_attempts: int = 3,
+    breaker_threshold: int = 5,
+    breaker_pause: float = 300.0,
 ) -> dict[str, int]:
+    """Download files politely.
+
+    The file server (watermark.drivethrurpg.com) sits behind Cloudflare and
+    answers with 503 when overloaded or rate-limiting (glujan/drpg issues
+    #143 and #155). So: one file at a time by default, a delay between files,
+    Retry-After / exponential back-off with a freshly prepared link on each
+    retry, and a circuit breaker that pauses once and then stops the job if
+    every file keeps failing, instead of hammering hundreds of URLs.
+    """
+    cancel = cancel or threading.Event()
+
+    def wait(seconds: float) -> None:
+        if sleep:
+            sleep(seconds)
+        elif cancel.wait(seconds):
+            raise JobCancelled
+
     counts = {"downloaded": 0, "up to date": 0, "failed": 0}
     lock = threading.Lock()
-    with DtrpgApi(cfg.api_key, read_timeout=cfg.request_timeout) as api, httpx.Client(timeout=120.0, follow_redirects=True) as http:
+    state = {"consecutive": 0, "paused": False, "abort": None, "detail_logged": False}
+    own_api, own_http = api is None, http is None
+    api = api or DtrpgApi(cfg.api_key, read_timeout=cfg.request_timeout)
+    http = http or httpx.Client(timeout=httpx.Timeout(300.0, connect=15.0), follow_redirects=True)
+    pending = [f for f in files if force or needs_download(
+        target_path(cfg, f["product_name"], f.get("publisher"), f["filename"]), f,
+        f.get("file_last_modified"), cfg.validate_checksums) is not None]
+    counts["up to date"] = len(files) - len(pending)
+    log(f"{len(pending)} file(s) to download, {counts['up to date']} already up to date")
+    try:
         api.authenticate()
 
         def one(f: dict[str, Any]) -> None:
-            try:
-                res = download_file(api, lib, cfg, f, http=http, force=force)
-            except Exception as e:
-                res = "failed"
-                log(f"FAILED {f['product_name']} / {f['filename']}: {e}")
-            else:
-                if res == "downloaded":
-                    log(f"Downloaded {f['product_name']} / {f['filename']}")
+            label = f"{f['product_name']} / {f['filename']}"
+            for attempt in range(1, max_attempts + 1):
+                if cancel.is_set() or state["abort"]:
+                    return
+                try:
+                    res = download_file(api, lib, cfg, f, http=http, force=True)
+                except DownloadHTTPError as e:
+                    if not state["detail_logged"]:
+                        state["detail_logged"] = True
+                        log(f"Download server response: {e.detail}")
+                    if e.status in RETRYABLE and attempt < max_attempts:
+                        delay = e.retry_after if e.retry_after is not None else min(300.0, 15.0 * 2 ** (attempt - 1))
+                        log(f"HTTP {e.status} for {label}; retry {attempt}/{max_attempts - 1} in {delay:.0f}s")
+                        wait(delay)
+                        continue
+                    err: Exception = e
+                    server_side = e.status in RETRYABLE
+                except (ApiError, httpx.HTTPError, OSError, ValueError) as e:
+                    err, server_side = e, isinstance(e, (httpx.TransportError,))
+                else:
+                    with lock:
+                        counts[res] += 1
+                        state["consecutive"] = 0
+                    log(f"Downloaded {label}")
+                    wait(cfg.download_delay)
+                    return
+                break
             with lock:
-                counts[res] += 1
+                counts["failed"] += 1
+                state["consecutive"] = state["consecutive"] + 1 if server_side else 0
+                tripped = state["consecutive"] >= breaker_threshold
+            log(f"FAILED {label}: {err}")
+            if tripped:
+                if not state["paused"]:
+                    state["paused"] = True
+                    log(f"{breaker_threshold} files in a row failed with server errors; pausing {breaker_pause/60:.0f} min")
+                    wait(breaker_pause)
+                    with lock:
+                        state["consecutive"] = 0
+                else:
+                    state["abort"] = (
+                        "DriveThruRPG's download server keeps returning errors; stopped. "
+                        "This is on their side (see Download server response above). Try again later; "
+                        "files already downloaded are kept and will be skipped."
+                    )
 
-        with ThreadPoolExecutor(max_workers=max(1, cfg.threads)) as pool:
-            list(pool.map(one, files))
+        workers = max(1, int(cfg.threads))
+        if workers == 1:
+            for f in pending:
+                if cancel.is_set() or state["abort"]:
+                    break
+                one(f)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(one, pending))
+    finally:
+        if own_api:
+            api.close()
+        if own_http:
+            http.close()
+    if state["abort"]:
+        log(state["abort"])
+    if cancel.is_set():
+        log("Stopped by user")
     log(f"Finished: {counts}")
     return counts

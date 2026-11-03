@@ -202,6 +202,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
+    # httpx logs every request URL at INFO; the auth URL contains the API key
+    # (?applicationKey=...) and download URLs contain one-time tokens.
+    for noisy in ("httpx", "httpcore", "hpack", "h2"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     return args.fn(args)
 
 

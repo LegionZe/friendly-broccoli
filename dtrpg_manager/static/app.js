@@ -254,13 +254,14 @@ async function loadSettings() {
   const c = await api("/api/config");
   const f = $("#settings-form");
   f.api_key.value = ""; f.api_key.placeholder = c.api_key_set ? `saved (${c.api_key})` : "paste your application key";
-  f.library_path.value = c.library_path; f.threads.value = c.threads;
+  f.library_path.value = c.library_path; f.threads.value = c.threads; f.download_delay.value = c.download_delay;
   f.omit_publisher.checked = c.omit_publisher; f.validate_checksums.checked = c.validate_checksums; f.include_archived.checked = c.include_archived;
   f.fetch_filters.checked = c.fetch_filters; f.request_timeout.value = c.request_timeout;
 }
 $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const f = e.target, body = { library_path: f.library_path.value, threads: +f.threads.value || 3,
+  const f = e.target, body = { library_path: f.library_path.value, threads: +f.threads.value || 1,
+    download_delay: f.download_delay.value === "" ? 2 : +f.download_delay.value,
     omit_publisher: f.omit_publisher.checked, validate_checksums: f.validate_checksums.checked, include_archived: f.include_archived.checked,
     fetch_filters: f.fetch_filters.checked, request_timeout: +f.request_timeout.value || 120 };
   if (f.api_key.value) body.api_key = f.api_key.value.trim();
@@ -279,7 +280,9 @@ let jobTimer;
 async function pollJobs() {
   clearTimeout(jobTimer);
   const jobs = await api("/api/jobs").catch(() => []);
-  $("#jobs").innerHTML = jobs.map((j) => `<div class="job ${j.state}"><b>${esc(j.kind)}</b> — ${esc(j.state)} (started ${esc(j.started)})<pre>${esc(j.log.join("\n"))}</pre></div>`).join("") || `<p class="hint">No jobs yet.</p>`;
+  $("#jobs").innerHTML = jobs.map((j) => `<div class="job ${j.state}"><b>${esc(j.kind)}</b> — ${esc(j.state)} (started ${esc(j.started)})
+    ${j.state === "running" ? `<button class="secondary" data-cancel="${esc(j.id)}">Stop</button>` : ""}<pre>${esc(j.log.join("\n"))}</pre></div>`).join("") || `<p class="hint">No jobs yet.</p>`;
+  $$("[data-cancel]").forEach((b) => b.addEventListener("click", () => api(`/api/jobs/${b.dataset.cancel}/cancel`, { method: "POST", body: {} }).then(() => toast("Stopping…")).catch(fail)));
   if (jobs.some((j) => j.state === "running")) jobTimer = setTimeout(pollJobs, 1500);
   else if (jobs.length) { loadMeta(); loadLibrary(); }
 }

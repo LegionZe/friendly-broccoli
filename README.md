@@ -84,6 +84,15 @@ The older `/api/v1/` endpoints documented in [jramboz/DTRPG_API](https://github.
 
 **Slow product list.** The authenticated `order_products` call can take longer than 30 seconds to respond (a `ReadTimeout` at 30 s was reported on 2026-11-03). The client now waits up to 120 s (`request_timeout`) and uses HTTP/2, as drpg does. If a page still times out, it retries without `getFilters` and then with smaller pages. Category fetching can be switched off in Settings or with `dtrpg-manager sync --no-filters`.
 
+**HTTP 503 from the download server.** File links point to `watermark.drivethrurpg.com`, which sits behind Cloudflare and answers with `503 Service Temporarily Unavailable` when it is overloaded or rate-limiting. drpg users report the same thing in [glujan/drpg#143](https://github.com/glujan/drpg/issues/143), where the maintainer suggests fewer threads and sequential downloads, and in [glujan/drpg#155](https://github.com/glujan/drpg/issues/155) (`503 Backend fetch failed`, May 2026). To cope with this, the app:
+
+- downloads one file at a time by default (`threads = 1`), with `download_delay` seconds between files;
+- on 429/5xx, honours `Retry-After` (otherwise backs off 15 s → 30 s) and prepares a fresh link before each retry;
+- pauses for 5 minutes after 5 consecutive server errors, and stops the job if the errors continue;
+- runs only one download job at a time, and has a **Stop** button.
+
+Files that are already downloaded are skipped on the next run.
+
 An invalid key returns HTTP 496 `{"error":{"message":"Invalid application key."}}` (observed 2026-11-03).
 
 ## Development
