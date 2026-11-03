@@ -353,8 +353,9 @@ async function loadRelated(id) {
   let html = "";
   if (r.links.length) html += "<h4>Linked</h4><ul class=\"rel-list\">" + r.links.map((l) => row(l, ` <span class="why">${esc(l.direction === "out" ? l.kind : "← " + l.kind)}</span> <button class="secondary" data-unlink="${esc(l.order_product_id)}|${esc(l.kind)}">✕</button>`)).join("") + "</ul>";
   if (r.same_line.length) html += "<h4>Same line</h4><ul class=\"rel-list\">" + r.same_line.map((x) => row(x)).join("") + "</ul>";
+  const top = Math.max(...r.similar.map((x) => x.score), 0.01);
   if (r.similar.length) html += "<h4>Similar</h4><ul class=\"rel-list\">" + r.similar.map((x) =>
-    `<li data-open="${esc(x.order_product_id)}"><span class="bar"><span style="width:${Math.round(Math.min(1, x.score) * 100)}%"></span></span>${x.thumb_url ? `<img src="${esc(x.thumb_url)}" alt="">` : ""}<span>${esc(x.name || "?")}<br><span class="why">${esc(x.why.join(" · "))}</span></span></li>`).join("") + "</ul>";
+    `<li data-open="${esc(x.order_product_id)}" title="similarity ${x.score.toFixed(2)}"><span class="bar"><span style="width:${Math.round(x.score / top * 100)}%"></span></span>${x.thumb_url ? `<img src="${esc(x.thumb_url)}" alt="">` : ""}<span>${esc(x.name || "?")}<br><span class="why">${esc(x.why.join(" · "))}</span></span></li>`).join("") + "</ul>";
   el.className = ""; el.innerHTML = html || `<span class="hint">Nothing related found yet — more tags make this better.</span>`;
   $$("[data-open]", el).forEach((li) => li.addEventListener("click", (e) => { if (e.target.dataset.unlink) return; openProduct(li.dataset.open); }));
   $$("[data-unlink]", el).forEach((b) => b.addEventListener("click", async (e) => {

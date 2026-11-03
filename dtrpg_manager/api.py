@@ -238,7 +238,9 @@ class DtrpgApi:
         say("Requesting product list (the first page can take a minute or more)")
         while True:
             page = offset // size + 1
-            items, with_filters, err = fetch(page, size, page_retries)
+            # full retries at normal size; once a page has failed persistently, the cause is
+            # evidently not transient, so smaller probes get one quick retry
+            items, with_filters, err = fetch(page, size, page_retries if size == target else 1)
             if items is None and size > min_page:
                 new = max(min_page, size // 2)
                 while new > 1 and offset % new:

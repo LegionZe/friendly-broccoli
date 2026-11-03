@@ -58,6 +58,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # "product_type", or "players" (pattern must capture min and optionally max).
     "rules": [
         {"id": "dnd5e", "pattern": r"\b5e\b|\bD&D\s*5|\bdnd\s*5e?\b|\bSRD\s*5\.\d|fifth edition (?:fantasy|compatible)",
+         # other games with a "5th edition" (observed: "Ars Magica 5E")
+         "exclude": r"Ars Magica|Shadowrun|Call of Cthulhu|Vampire|Werewolf|\bMage\b|Warhammer|Paranoia",
          "kind": "system", "name": "D&D 5e"},
         {"id": "pf2e", "pattern": r"\bPathfinder\s*(?:2e|second edition|2nd edition)\b|\bPF2e?\b",
          "kind": "system", "name": "Pathfinder 2e"},
@@ -126,6 +128,8 @@ def validate_config(conf: dict[str, Any]) -> None:
             raise ValueError(f"rule {r['id']}: {r['name']!r} is not a product type")
         try:
             re.compile(r["pattern"], re.I)
+            if r.get("exclude"):
+                re.compile(r["exclude"], re.I)
         except re.error as e:
             raise ValueError(f"rule {r['id']}: bad pattern: {e}") from e
 
@@ -199,17 +203,18 @@ def run_rules(
     lib: Library, conf: dict[str, Any], *, preview: bool = False, opids: list[str] | None = None
 ) -> dict[str, Any]:
     """Apply regex rules. With ``preview`` nothing is written; returns per-rule match counts."""
-    rules = [(r, re.compile(r["pattern"], re.I)) for r in conf["rules"]]
+    rules = [(r, re.compile(r["pattern"], re.I), re.compile(r["exclude"], re.I) if r.get("exclude") else None)
+             for r in conf["rules"]]
     weights = conf.get("rule_confidence", {})
-    counts = {r["id"]: 0 for r, _ in rules}
-    examples: dict[str, list[str]] = {r["id"]: [] for r, _ in rules}
+    counts = {r["id"]: 0 for r, _, _ in rules}
+    examples: dict[str, list[str]] = {r["id"]: [] for r, _, _ in rules}
     queued = 0
     for p in _texts(lib, opids):
-        for rule, rx in rules:
+        for rule, rx, ex in rules:
             hit = None
             for field in rule.get("fields", DEFAULT_FIELDS):
                 text = p.get(field)
-                if text and (m := rx.search(text)):
+                if text and (m := rx.search(text)) and not (ex and ex.search(text)):
                     hit = (field, m)
                     break
             if not hit:

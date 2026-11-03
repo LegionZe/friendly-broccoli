@@ -19,10 +19,23 @@ from typing import Any
 
 from .db import Library
 
-STOP = set("""a an and are as at be by for from has have in into is it its of on or that the this to with your you
-our their they them we will can more new all one two three edition volume vol part book books game games rpg
-roleplaying role playing pdf supplement adventure adventures rules rule core set pack collection guide""".split())
-WORD = re.compile(r"[a-z0-9][a-z0-9'&+-]{2,}")
+# English function words plus RPG-catalogue boilerplate that says nothing about content.
+STOP = set("""a about above after again against all almost alone along already also although always am among an and
+another any anyone anything are around as at away back be became because become been before being below best better
+between both but by came can cannot could did do does doing done down during each either else enough even ever every
+everything few find first for found from full further get gets give given go goes going good got great had has have
+having he her here hers herself him himself his how however i if in including inside instead into is it its itself
+just keep know last least less like little lot made make makes making many may me more most much must my myself need
+never new next no none nor not nothing now of off often on once one only onto or other others our ours out over own
+part per perhaps put rather really right said same see seen several shall she should since so some something soon
+still such take than that the their theirs them themselves then there these they thing things this those though three
+through thus to together too took toward two under until up upon us use used uses using very via want was way we well
+were what whatever when where whether which while who whole whom whose why will with within without would yet you your
+yours yourself
+edition volume vol book books game games rpg rpgs roleplaying role playing play players player pdf supplement
+supplements adventure adventures rules rule core set pack collection guide new includes include included contains
+page pages full print version product products available official compatible system systems world worlds""".split())
+WORD = re.compile(r"(?<![a-z0-9'])[a-z0-9][a-z0-9&+-]{2,}(?![a-z0-9]*')")  # skips contractions (you'll)
 SEP = re.compile(r"\s*(?::| - | – | — |\(|\[|,)\s*")
 WEIGHTS = {"f": 1.0, "fa": 0.5, "tag": 1.0, "system": 1.4, "setting": 1.4, "pub": 0.6, "t": 0.7, "d": 0.25}
 GENERIC_FILTERS = {"Roleplaying", "Miscellaneous", "Other systems", "Generic", "PDF", "Digital",
@@ -30,7 +43,8 @@ GENERIC_FILTERS = {"Roleplaying", "Miscellaneous", "Other systems", "Generic", "
 
 
 def _words(text: str | None) -> list[str]:
-    return [w for w in WORD.findall((text or "").lower()) if w not in STOP and not w.isdigit()]
+    text = re.sub(r"['’]s\b", "", (text or "").lower())  # possessive -> base word
+    return [w for w in WORD.findall(text) if w not in STOP and not w.isdigit()]
 
 
 class RelatedIndex:
@@ -103,7 +117,7 @@ class RelatedIndex:
             v = {}
             for k, w in feats.items():
                 # unique features can't link anything; near-universal ones carry no signal
-                if df[k] < 2 or (n >= 20 and df[k] > n * 0.5):
+                if df[k] < (3 if k.startswith("d:") else 2) or (n >= 20 and df[k] > n * 0.5):
                     continue
                 v[k] = w * (math.log(n / df[k]) + 0.1)
             norm = math.sqrt(sum(x * x for x in v.values())) or 1.0

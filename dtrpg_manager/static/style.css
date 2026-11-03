@@ -121,7 +121,7 @@ details pre { white-space: pre-wrap; font-size: 11px; max-height: 300px; overflo
 .pass h3 { margin: 0 0 4px; font-size: 14px; }
 .pass pre, #p-llm-batches { font-size: 11px; white-space: pre-wrap; max-height: 180px; overflow: auto; margin: 6px 0 0; }
 label.inline, label.check.inline { display: inline-flex; gap: 4px; align-items: center; margin: 0; }
-label.inline input { width: 70px; }
+label.inline input:not([type=checkbox]) { width: 70px; }
 .q-filters select, .q-filters input { width: auto; }
 .q-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
 .q-table td { border-top: 1px solid var(--line); padding: 4px; font-size: 13px; vertical-align: middle; }

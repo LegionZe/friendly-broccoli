@@ -65,6 +65,38 @@ dtrpg-manager reparse                  # re-normalise stored raw JSON
 
 Configuration lives in `~/.config/dtrpg-manager/config.json` (`%APPDATA%\dtrpg-manager` on Windows, `~/Library/Application Support/dtrpg-manager` on macOS). The file is written with mode 600. The environment variables `DTRPG_API_KEY` (or `DRPG_TOKEN`, for compatibility with drpg), `DTRPG_LIBRARY_PATH`, and `DTRPG_MANAGER_HOME` override it.
 
+## Automatic tagging
+
+The **Auto-tag** page runs four passes. Each tag records where it came from (`manual`, `dtrpg`, `rule`, `llm`) and, for automatic tags, a confidence. Tags you add are never changed by a pass. Anything you remove or reject is remembered and not suggested again.
+
+| Pass | What it does | Applied how |
+|---|---|---|
+| 1 · DriveThruRPG categories | Genre → `genre` tags, Rule System → `system` tags, Product Type → product type; parent categories included; umbrella labels such as "Other systems" skipped | directly |
+| 2 · Keyword rules | Case-insensitive regular expressions over title, publisher, description and PDF text (D&D 5e, PbtA, Forged in the Dark, OSR, solo, GM-less, one-shot, zine, player counts, …) | suggestions to review |
+| 3 · Read PDFs | Page count, PDF metadata and the first 3 pages' text of each product's largest downloaded PDF (`pypdf`, local) | feeds passes 2 and 4 |
+| 4 · AI (Claude Haiku 5.5) | Classifies thinly tagged products against your existing vocabulary, via the Message Batches API (50% price) with a JSON-schema response. Shows an estimated cost and asks for confirmation before submitting. | suggestions to review |
+
+The mapping and rules are editable on the same page and are stored in `enrich.json` next to `config.json`. Pass 4 needs `pip install -e .[llm]` and an Anthropic API key (Settings, or `ANTHROPIC_API_KEY`).
+
+```bash
+dtrpg-manager enrich dtrpg
+dtrpg-manager enrich rules --preview
+dtrpg-manager enrich pdf
+dtrpg-manager enrich llm-estimate
+dtrpg-manager enrich llm-submit --limit 50
+dtrpg-manager enrich llm-collect
+```
+
+## Related products
+
+Each product's detail panel lists:
+
+- **Linked** — relationships you add (`related`, `same-line`, `supplement-of`, `requires`, `sequel-of`).
+- **Same line** — same publisher with a shared title prefix (e.g. "Dungeon Crawl Classics …", "Fiasco: …").
+- **Similar** — cosine similarity over TF-IDF-weighted DriveThruRPG categories, your tags, publisher, and title and description words. Each match lists the features it shares, for example `title: blades · publisher: Evil Hat Productions`.
+
+**🎲 Something like this** runs the random picker restricted to similar products, weighted by closeness. From the CLI, use `dtrpg-manager related <orderProductId>`.
+
 ## API notes and known unknowns
 
 DriveThruRPG has no public API documentation. This app uses the `https://api.drivethrurpg.com/api/vBeta/` endpoints as implemented in:
