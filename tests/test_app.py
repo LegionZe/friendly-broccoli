@@ -203,10 +203,32 @@ def test_timeout_falls_back_without_filters_then_smaller_pages():
 
     msgs = []
     a = DtrpgApi("K", transport=httpx.MockTransport(h), backoff=0)
-    got = list(a.iter_products(50, progress=msgs.append))
+    got = list(a.iter_products(50, progress=msgs.append, page_retries=1, retry_wait=0))
     assert [g["orderProductId"] for g in got] == list(range(1, 24))
-    assert any("without DriveThruRPG category" in m for m in msgs)
+    assert any("without category data" in m for m in msgs)
     assert any("page size 6" in m for m in msgs)  # 50 -> 25 -> 12 -> 6
+
+
+def test_transient_502_keeps_categories():
+    data = _many(7)
+    state = {"fail": 2}
+    seen_filters = []
+
+    def h(request):
+        if request.url.path.endswith("/auth_key"):
+            return httpx.Response(200, json={"token": "T"})
+        p = request.url.params
+        page = int(p["page"])
+        if page == 2 and state["fail"]:
+            state["fail"] -= 1
+            return httpx.Response(502, text="upstream request failed")
+        seen_filters.append(p["getFilters"])
+        return httpx.Response(200, json=data[(page - 1) * 5: page * 5])
+
+    a = DtrpgApi("K", transport=httpx.MockTransport(h), backoff=0, retries=0)
+    got = list(a.iter_products(5, progress=lambda m: None, page_retries=3, retry_wait=0))
+    assert len(got) == 7
+    assert set(seen_filters) == {"1"}  # never degraded for a transient error
 
 
 def test_server_page_cap_does_not_truncate():

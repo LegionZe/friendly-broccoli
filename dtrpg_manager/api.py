@@ -181,35 +181,59 @@ class DtrpgApi:
         archived: bool = False,
         filters: bool = True,
         progress: Callable[[str], None] | None = None,
+        page_retries: int = 3,
+        retry_wait: float = 20.0,
     ) -> Iterator[dict[str, Any]]:
-        """Yield every product, degrading gracefully if pages time out.
+        """Yield every product, recovering from slow or failing pages.
 
         Pages are requested until an empty one comes back (as glujan/drpg's
         ``customer_products`` does), so a server-side page-size cap is harmless.
-        On a failed page: first drop ``getFilters`` (drpg sends 0), then halve
-        the page size down to 5 and resume from the number of products already
-        received. Duplicates are suppressed by ``orderProductId``.
+
+        For a failing page, in order:
+        1. retry the same request ``page_retries`` times with growing waits
+           (transient 502/503/timeouts are common on large libraries);
+        2. retry that page once without ``getFilters`` (the slow part; drpg
+           sends 0) -- categories are re-enabled for the next page;
+        3. halve the page size (down to 5) and resume from the number of
+           products already received.
+        Duplicates are suppressed by ``orderProductId``.
         """
         say = progress or (lambda m: logger.info(m))
         page = 1
-        largest_page = 0  # actual items per page the server returns
+        largest_page = 0
         seen: set[str] = set()
+        missing_filters = 0
         say("Requesting product list (the first page can take a minute or more)")
         while True:
-            try:
-                items = unwrap_products(self.products_page(page, page_size, archived=archived, filters=filters))
-            except ApiError as e:
-                if filters:
-                    filters = False
-                    say(f"Page {page} failed ({e}); retrying without DriveThruRPG category data")
-                elif page_size > 5:
-                    page_size = max(5, min(page_size, largest_page or page_size) // 2)
-                    page = len(seen) // page_size + 1
-                    say(f"Page failed ({e}); retrying with page size {page_size} from page {page}")
-                else:
-                    raise
+            items = None
+            err: Exception | None = None
+            for attempt in range(page_retries + 1):
+                try:
+                    items = unwrap_products(self.products_page(page, page_size, archived=archived, filters=filters))
+                    break
+                except ApiError as e:
+                    err = e
+                    if attempt < page_retries:
+                        wait = retry_wait * (attempt + 1)
+                        say(f"Page {page} failed ({e}); retry {attempt + 1}/{page_retries} in {wait:.0f}s")
+                        time.sleep(wait)
+            if items is None and filters:
+                say(f"Page {page} still failing; fetching it once without category data")
+                try:
+                    items = unwrap_products(self.products_page(page, page_size, archived=archived, filters=False))
+                    missing_filters += len(items)
+                except ApiError as e:
+                    err = e
+            if items is None:
+                if page_size <= 5:
+                    raise ApiError(f"Giving up on page {page} after {len(seen)} products: {err}")
+                page_size = max(5, min(page_size, largest_page or page_size) // 2)
+                page = len(seen) // page_size + 1
+                say(f"Retrying with page size {page_size} from page {page}")
                 continue
             if not items:
+                if missing_filters:
+                    say(f"{missing_filters} products were fetched without category data; sync again to fill them in")
                 return
             largest_page = max(largest_page, len(items))
             new = 0
