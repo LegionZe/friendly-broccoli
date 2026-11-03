@@ -656,3 +656,52 @@ def test_map_rules():
     assert ("3", "category", "geomorphs") in got
     assert not any(o == "4" for o, _, _ in got)            # adventure merely mentioning maps
     assert ("5", "category", "battlemap") in got and ("5", "product_type", "map") not in got
+
+
+def test_failed_checks_are_held_for_24h(api, lib, cfg):
+    from dtrpg_manager.sync import download_many, on_hold
+
+    sync_library(api, lib, cfg, progress=lambda m: None)
+    cfg.download_delay, cfg.threads, cfg.validate_checksums = 0, 1, True  # strict: mismatch fails
+    files = [f for f in lib.all_files() if f["order_product_id"] == "1"]
+    hits = []
+
+    def bad(r):
+        hits.append(r)
+        return httpx.Response(200, content=b"%PDF-not-the-expected-bytes")
+
+    http = httpx.Client(transport=httpx.MockTransport(bad))
+    run = lambda **k: download_many(cfg, lib, [f for f in lib.all_files() if f["order_product_id"] == "1"],
+                                    lambda m: None, api=api, http=http, sleep=lambda s: None, **k)
+    assert run()["failed"] == 1
+    held = lib.held_files()
+    assert len(held) == 1 and "Checksum mismatch" in held[0]["fail_reason"]
+    assert on_hold(lib.all_files()[0] if lib.all_files()[0]["failed_at"] else held[0], 24)
+    n = len(hits)
+    res = run()
+    assert res["on hold"] == 1 and res["failed"] == 0 and len(hits) == n   # skipped, nothing fetched
+    run(force=True)                                                         # single-file download ignores hold
+    assert len(hits) == n + 1
+    cfg.hold_failed_hours = 0                                               # 0 = never hold
+    assert run()["on hold"] == 0
+    cfg.hold_failed_hours = 24
+    lib.clear_failed()
+    assert lib.held_files() == []
+    # a successful download clears the hold
+    lib.mark_failed("1", 0, "Checksum mismatch")
+    cfg.validate_checksums = False
+    lib.clear_failed("1", 0)
+    assert run()["downloaded"] == 1 and lib.held_files() == []
+
+
+def test_web_download_holds(api, lib, cfg):
+    from dtrpg_manager.web import create_app
+
+    sync_library(api, lib, cfg, progress=lambda m: None)
+    lib.mark_failed("1", 0, "Checksum mismatch for x")
+    c = create_app(cfg, lib).test_client()
+    r = c.get("/api/download-holds").get_json()
+    assert r["hours"] == 24 and r["items"][0]["retry_after"]
+    assert c.post("/api/download-holds/clear", json={"order_product_id": "1", "idx": 0}).get_json()["cleared"] == 1
+    assert c.get("/api/download-holds").get_json()["items"] == []
+    assert c.patch("/api/config", json={"hold_failed_hours": 48}).get_json()["hold_failed_hours"] == 48

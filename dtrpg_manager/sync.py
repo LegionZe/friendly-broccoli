@@ -8,7 +8,7 @@ import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -99,6 +99,21 @@ def needs_download(path: Path, file_row: dict[str, Any], file_last_modified: str
     return None
 
 
+class ContentCheckError(ApiError):
+    """The downloaded bytes failed a check (checksum, not a PDF); file not saved."""
+
+
+def on_hold(file_row: dict[str, Any], hours: float) -> datetime | None:
+    """If the file failed a content check less than ``hours`` ago, return when it may be retried."""
+    if not file_row.get("failed_at") or hours <= 0:
+        return None
+    try:
+        until = datetime.fromisoformat(file_row["failed_at"]) + timedelta(hours=hours)
+    except ValueError:
+        return None
+    return until if until > datetime.now(timezone.utc) else None
+
+
 class DownloadHTTPError(ApiError):
     """Non-2xx response from the file (watermark/CDN) server."""
 
@@ -170,11 +185,11 @@ def download_file(
     digest = h.hexdigest()
     if path.suffix.lower() == ".pdf" and not head.startswith(b"%PDF"):
         tmp.unlink(missing_ok=True)
-        raise ApiError(f"{file_row['filename']} is not a PDF (got {head[:8]!r}); not saved")
+        raise ContentCheckError(f"{file_row['filename']} is not a PDF (got {head[:8]!r}); not saved")
     if file_row.get("checksum") and digest != file_row["checksum"]:
         if cfg.validate_checksums:
             tmp.unlink(missing_ok=True)
-            raise ApiError(f"Checksum mismatch for {file_row['filename']} ({digest} != {file_row['checksum']})")
+            raise ContentCheckError(f"Checksum mismatch for {file_row['filename']} ({digest} != {file_row['checksum']})")
         logger.info("%s: MD5 differs from DriveThruRPG's record (normal for re-watermarked files)", file_row["filename"])
     tmp.replace(path)
     if flm := file_row.get("file_last_modified"):
@@ -321,7 +336,7 @@ def download_many(
         elif cancel.wait(seconds):
             raise JobCancelled
 
-    counts = {"downloaded": 0, "up to date": 0, "failed": 0}
+    counts = {"downloaded": 0, "up to date": 0, "failed": 0, "on hold": 0}
     lock = threading.Lock()
     state = {"consecutive": 0, "paused": False, "abort": None, "detail_logged": False}
     own_api, own_http = api is None, http is None
@@ -333,6 +348,14 @@ def download_many(
         target_path(cfg, f["product_name"], f.get("publisher"), f["filename"]), f,
         f.get("file_last_modified"), cfg.verify_existing) is not None]
     counts["up to date"] = len(files) - len(pending)
+    if not force and cfg.hold_failed_hours > 0:
+        held = [f for f in pending if on_hold(f, cfg.hold_failed_hours)]
+        if held:
+            pending = [f for f in pending if f not in held]
+            counts["on hold"] = len(held)
+            soonest = min(on_hold(f, cfg.hold_failed_hours) for f in held)
+            log(f"{len(held)} file(s) on hold after failed checks; next retry from "
+                f"{soonest.astimezone().strftime('%Y-%m-%d %H:%M')} (Settings › Downloads on hold)")
     log(f"{len(pending)} file(s) to download, {counts['up to date']} already up to date")
     try:
         api.authenticate()
@@ -362,6 +385,10 @@ def download_many(
                     limiter.release()
                     err: Exception = e
                     server_side = e.status in RETRYABLE
+                except ContentCheckError as e:
+                    limiter.release()
+                    lib.mark_failed(f["order_product_id"], f["idx"], str(e))
+                    err, server_side = e, False
                 except (ApiError, httpx.HTTPError, OSError, ValueError) as e:
                     limiter.release()
                     err, server_side = e, isinstance(e, (httpx.TransportError,))

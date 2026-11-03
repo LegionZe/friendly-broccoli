@@ -173,6 +173,10 @@
         <a class="button secondary" href="/api/export.csv">Export CSV</a>
         <label class="button secondary">Import JSON <input id="import-file" type="file" accept=".json" hidden></label>
       </div>
+      <h2>Downloads on hold</h2>
+      <p class="hint">Files whose download failed a check (checksum in strict mode, or not a PDF) are skipped by “Download all” for
+        <input id="hold-hours" type="number" min="0" max="720" step="1" style="width:70px"> hours (0 = never hold). Downloading a single file from its product panel ignores the hold.</p>
+      <div id="holds"></div>
       <h2>Jobs</h2>
       <div id="jobs"></div>
     </div>

@@ -305,7 +305,24 @@ function renderTagAdmin() {
 }
 
 // ---------- settings / jobs ----------
+async function loadHolds() {
+  const r = await api("/api/download-holds").catch(() => null); if (!r) return;
+  $("#hold-hours").value = r.hours;
+  $("#holds").innerHTML = r.items.length ? `<table class="files">${r.items.map((f) => `<tr>
+      <td>${esc(f.product_name)}<br><span class="hint">${esc(f.filename)}</span></td>
+      <td class="hint">${esc(f.fail_reason || "")}</td>
+      <td class="hint">${f.retry_after ? "retry after " + esc(f.retry_after.replace("T", " ").slice(0, 16)) + " UTC" : "will retry next run"}</td>
+      <td><button class="secondary" data-unhold="${esc(f.order_product_id)}|${f.idx}">Retry next run</button></td></tr>`).join("")}</table>
+      <button class="secondary" id="unhold-all">Release all</button>` : `<p class="hint">Nothing on hold.</p>`;
+  $$("[data-unhold]").forEach((b) => b.addEventListener("click", async () => {
+    const [order_product_id, idx] = b.dataset.unhold.split("|");
+    await api("/api/download-holds/clear", { method: "POST", body: { order_product_id, idx: +idx } }).catch(fail); loadHolds();
+  }));
+  $("#unhold-all")?.addEventListener("click", async () => { await api("/api/download-holds/clear", { method: "POST", body: { all: true } }).catch(fail); loadHolds(); });
+}
+$("#hold-hours").addEventListener("change", (e) => api("/api/config", { method: "PATCH", body: { hold_failed_hours: Math.max(0, +e.target.value || 0) } }).then(() => { toast("Saved"); loadHolds(); }).catch(fail));
 async function loadSettings() {
+  loadHolds();
   const c = await api("/api/config");
   const f = $("#settings-form");
   f.api_key.value = ""; f.api_key.placeholder = c.api_key_set ? `saved (${c.api_key})` : "paste your application key";

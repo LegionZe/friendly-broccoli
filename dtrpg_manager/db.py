@@ -177,7 +177,8 @@ class Library:
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
         f_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(files)")}
-        for col, typ in (("local_size", "INTEGER"), ("local_md5", "TEXT")):
+        for col, typ in (("local_size", "INTEGER"), ("local_md5", "TEXT"), ("failed_at", "TEXT"),
+                         ("fail_reason", "TEXT")):
             if col not in f_cols:
                 self.conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typ}")
         pt_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(product_tags)")}
@@ -297,10 +298,28 @@ class Library:
             )
         else:
             self._x(
-                """UPDATE files SET local_path=?, downloaded_at=?, local_size=?, local_md5=?
+                """UPDATE files SET local_path=?, downloaded_at=?, local_size=?, local_md5=?,
+                       failed_at=NULL, fail_reason=NULL
                    WHERE order_product_id=? AND idx=?""",
                 (local_path, now(), size, md5, opid, idx),
             )
+
+    # -- download holds -----------------------------------------------------
+    def mark_failed(self, opid: str, idx: int, reason: str) -> None:
+        self._x("UPDATE files SET failed_at=?, fail_reason=? WHERE order_product_id=? AND idx=?",
+                (now(), reason[:300], opid, idx))
+
+    def clear_failed(self, opid: str | None = None, idx: int | None = None) -> int:
+        if opid is None:
+            return self._x("UPDATE files SET failed_at=NULL, fail_reason=NULL WHERE failed_at IS NOT NULL").rowcount
+        return self._x("UPDATE files SET failed_at=NULL, fail_reason=NULL WHERE order_product_id=? AND idx=?",
+                       (opid, idx)).rowcount
+
+    def held_files(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._q(
+            """SELECT f.order_product_id, f.idx, f.filename, f.failed_at, f.fail_reason, p.name AS product_name
+               FROM files f JOIN products p USING(order_product_id)
+               WHERE f.failed_at IS NOT NULL ORDER BY f.failed_at DESC""")]
 
     # -- metadata ---------------------------------------------------------
     def update_meta(self, opid: str, changes: dict[str, Any]) -> None:

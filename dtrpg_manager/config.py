@@ -32,6 +32,7 @@ class Config:
     include_archived: bool = False
     threads: int = 4  # max parallel downloads (1-8); reduced automatically when the server pushes back
     download_delay: float = 0.0  # optional pause after each download, per worker
+    hold_failed_hours: float = 24.0  # skip files that failed a checksum/content check for this long
     verify_existing: bool = False  # hash every existing file when checking what's up to date (slow)
     page_size: int = 50
     fetch_filters: bool = True  # getFilters=1: DTRPG categories; slower server-side

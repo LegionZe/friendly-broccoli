@@ -189,6 +189,22 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
             abort(404)
         return jsonify(ok=True)
 
+    @app.get("/api/download-holds")
+    def download_holds():
+        from .sync import on_hold
+        out = []
+        for f in lib.held_files():
+            until = on_hold(f, cfg.hold_failed_hours)
+            out.append({**f, "retry_after": until.isoformat(timespec="minutes") if until else None})
+        return jsonify(hours=cfg.hold_failed_hours, items=out)
+
+    @app.post("/api/download-holds/clear")
+    def clear_holds():
+        body = request.get_json()
+        if body.get("all"):
+            return jsonify(cleared=lib.clear_failed())
+        return jsonify(cleared=lib.clear_failed(str(body["order_product_id"]), int(body["idx"])))
+
     @app.get("/api/jobs")
     def api_jobs():
         return jsonify(jobs.list())
@@ -214,7 +230,7 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
         body = request.get_json()
         allowed = {"api_key", "library_path", "omit_publisher", "validate_checksums",
                    "include_archived", "threads", "page_size", "fetch_filters", "request_timeout", "download_delay",
-                   "anthropic_api_key", "verify_existing"}
+                   "anthropic_api_key", "verify_existing", "hold_failed_hours"}
         for k, v in body.items():
             if k not in allowed:
                 raise ValueError(f"Unknown setting {k}")
