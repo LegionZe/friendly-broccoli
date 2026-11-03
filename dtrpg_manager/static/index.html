@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DTRPG Manager</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>DTRPG Manager</h1>
+  <nav>
+    <button data-view="library" class="active">Library</button>
+    <button data-view="suggest">Random pick</button>
+    <button data-view="tags">Genres &amp; tags</button>
+    <button data-view="settings">Settings &amp; sync</button>
+  </nav>
+  <div id="stats" class="stats"></div>
+</header>
+
+<main>
+  <!-- LIBRARY -->
+  <section id="view-library" class="view active">
+    <aside class="sidebar" id="filters">
+      <input id="f-q" type="search" placeholder="Search name, publisher, notes">
+      <label>Sort
+        <select id="f-sort">
+          <option value="name">Name</option><option value="publisher">Publisher</option>
+          <option value="purchased">Purchased (newest)</option><option value="updated">Updated (newest)</option>
+          <option value="rating">Rating</option>
+        </select>
+      </label>
+      <label>Status <select id="f-status"><option value="">Any</option></select></label>
+      <label>Type <select id="f-type"><option value="">Any</option></select></label>
+      <label>Publisher <select id="f-publisher"><option value="">Any</option></select></label>
+      <label>Min rating <select id="f-rating"><option value="">Any</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
+      <label>Players <input id="f-players" type="number" min="1" max="20" placeholder="any"></label>
+      <label>Downloaded <select id="f-downloaded"><option value="">Any</option><option value="yes">Yes</option><option value="no">No</option></select></label>
+      <label class="check"><input id="f-fav" type="checkbox"> Favourites only</label>
+      <label class="check"><input id="f-untagged" type="checkbox"> Untagged only</label>
+      <label class="check"><input id="f-archived" type="checkbox"> Include archived</label>
+      <div id="f-tags" class="facet"></div>
+      <div id="f-dtrpg" class="facet"></div>
+      <button id="f-clear" class="secondary">Clear filters</button>
+    </aside>
+    <div class="content">
+      <div class="toolbar">
+        <span id="result-count"></span>
+        <label class="check"><input id="select-all" type="checkbox"> Select page</label>
+        <span id="bulk" class="bulk hidden">
+          <select id="bulk-kind"></select>
+          <input id="bulk-name" placeholder="tag name" list="tag-names">
+          <button id="bulk-tag">Tag selected</button>
+          <select id="bulk-status"><option value="">Set status…</option></select>
+          <button id="bulk-download">Download selected</button>
+        </span>
+        <span class="spacer"></span>
+        <button id="view-toggle" class="secondary">List view</button>
+      </div>
+      <div id="grid" class="grid"></div>
+      <div class="pager"><button id="prev" class="secondary">◀ Prev</button><span id="page"></span><button id="next" class="secondary">Next ▶</button></div>
+    </div>
+  </section>
+
+  <!-- SUGGEST -->
+  <section id="view-suggest" class="view">
+    <div class="suggest-panel">
+      <h2>What should we play?</h2>
+      <p class="hint">Picks from your library using the filters below. Weighted mode favours favourites, “want-to-play” and unread items, and skips the last 10 suggestions.</p>
+      <div class="suggest-form">
+        <label>Genre / tags (all must match)<div id="s-tags" class="chips-select"></div></label>
+        <label>DTRPG category<select id="s-filter"><option value="">Any</option></select></label>
+        <label>Status
+          <select id="s-status" multiple size="4"></select>
+        </label>
+        <label>Type <select id="s-type"><option value="">Any</option></select></label>
+        <label>Players <input id="s-players" type="number" min="1" max="20" placeholder="any"></label>
+        <label>Min rating <select id="s-rating"><option value="">Any</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
+        <label>How many <input id="s-count" type="number" min="1" max="20" value="1"></label>
+        <label class="check"><input id="s-weighted" type="checkbox" checked> Weighted</label>
+        <label class="check"><input id="s-fav" type="checkbox"> Favourites only</label>
+      </div>
+      <button id="roll" class="big">🎲 Roll</button>
+      <div id="suggest-out" class="grid"></div>
+    </div>
+  </section>
+
+  <!-- TAGS -->
+  <section id="view-tags" class="view">
+    <div class="panel">
+      <h2>Genres, categories, systems, settings &amp; tags</h2>
+      <p class="hint">Your own classification. Add tags from a product's detail panel or with bulk tagging in the Library. DriveThruRPG's own category filters (from sync) are listed separately below.</p>
+      <div id="tag-admin"></div>
+      <h3>DriveThruRPG categories (read-only, from sync)</h3>
+      <div id="dtrpg-admin"></div>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="view-settings" class="view">
+    <div class="panel">
+      <h2>Settings</h2>
+      <form id="settings-form">
+        <label>API key <small>(“Library App Keys” at <a href="https://www.drivethrurpg.com/en/account/settings" target="_blank" rel="noopener">drivethrurpg.com/en/account/settings</a>)</small>
+          <input name="api_key" type="password" autocomplete="off"></label>
+        <label>Download folder <input name="library_path"></label>
+        <label>Parallel downloads <input name="threads" type="number" min="1" max="8"></label>
+        <label class="check"><input name="omit_publisher" type="checkbox"> Don't create publisher folders</label>
+        <label class="check"><input name="validate_checksums" type="checkbox"> Validate MD5 checksums</label>
+        <label class="check"><input name="include_archived" type="checkbox"> Sync archived products too</label>
+        <button type="submit">Save settings</button>
+      </form>
+      <h2>Sync &amp; download</h2>
+      <div class="row">
+        <button id="do-sync">⟳ Sync library from DriveThruRPG</button>
+        <button id="do-download-all" class="secondary">⬇ Download all new/updated files</button>
+      </div>
+      <h2>Metadata backup</h2>
+      <div class="row">
+        <a class="button secondary" href="/api/export.json">Export JSON</a>
+        <a class="button secondary" href="/api/export.csv">Export CSV</a>
+        <label class="button secondary">Import JSON <input id="import-file" type="file" accept=".json" hidden></label>
+      </div>
+      <h2>Jobs</h2>
+      <div id="jobs"></div>
+    </div>
+  </section>
+</main>
+
+<div id="drawer" class="drawer hidden" role="dialog" aria-modal="true">
+  <div class="drawer-inner">
+    <button id="drawer-close" class="close" aria-label="Close">✕</button>
+    <div id="drawer-body"></div>
+  </div>
+</div>
+<datalist id="tag-names"></datalist>
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
