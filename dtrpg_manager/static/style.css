@@ -74,6 +74,8 @@ label.check input { width: auto; margin: 0; }
 .chip.setting { background: var(--setting); } .chip.category { background: var(--category); }
 .chip.dtrpg { background: transparent; border: 1px solid var(--line); color: var(--muted); }
 .chip button { background: none; border: none; color: inherit; padding: 0; font-size: 12px; }
+.tag-selects { display: contents; }  /* its labels sit directly in the suggest-form grid */
+.facet select option { font-size: 13px; }
 .chips-select { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .chips-select .chip { cursor: pointer; user-select: none; opacity: .55; }
 .chips-select .chip.on { opacity: 1; outline: 2px solid var(--accent); }

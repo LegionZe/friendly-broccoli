@@ -5,7 +5,7 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const PAGE = 60;
 const SRC_LABEL = { manual: "", dtrpg: "DTRPG", rule: "rule", pdf: "PDF", llm: "AI" };
 const chip = (t, extra = "") => `<span class="chip ${esc(t.kind)} ${t.source && t.source !== "manual" ? "auto" : ""} filterable" data-tag-filter="${esc(t.id)}" data-label="${esc(t.kind)}: ${esc(t.name)}" title="Show all with this tag · ${t.source && t.source !== "manual" ? "added by " + esc(SRC_LABEL[t.source] || t.source) + (t.confidence ? ` (confidence ${(+t.confidence).toFixed(2)})` : "") : "added by you"}">${extra}${esc(t.name)}</span>`;
-const state = { meta: null, offset: 0, total: 0, selected: new Set(), listView: false, tagSel: new Set(), filterSel: new Set(), sTags: new Set() };
+const state = { meta: null, offset: 0, total: 0, selected: new Set(), listView: false, tagSel: new Set(), filterSel: new Set(), sTags: new Set(), sFilters: new Set() };
 
 async function api(path, opts = {}) {
   const init = { method: opts.method || "GET", headers: {} };
@@ -46,7 +46,6 @@ async function loadMeta() {
   fillSelect($("#bulk-kind"), m.tag_kinds.map((k) => [k, k]), false);
   const pub = $("#f-publisher"), cur = pub.value;
   fillSelect(pub, m.publishers.map((p) => [p.name, `${p.name} (${p.count})`])); pub.value = cur;
-  fillSelect($("#s-filter"), filterTreeOptions());
   $("#tag-names").innerHTML = [...new Set(m.tags.map((t) => t.name))].map((n) => `<option value="${esc(n)}">`).join("");
   renderFacets();
   renderSuggestTags();
@@ -72,17 +71,39 @@ function filterTreeOptions() {
     out.push([f.id, `${g}: ${"— ".repeat(f.depth)}${f.name} (${f.count})`])));
   return out;
 }
-function renderFacets() {
+// One dropdown per tag kind / DTRPG group. Each set (e.g. state.tagSel) holds at
+// most one id per dropdown; dropdowns combine with AND.
+const KIND_LABEL = { genre: "Genre", system: "System", setting: "Setting", category: "Category", tag: "Tag" };
+function tagDropdowns(sel) {
   const kinds = {};
   state.meta.tags.forEach((t) => (kinds[t.kind] ||= []).push(t));
-  $("#f-tags").innerHTML = state.meta.tag_kinds.filter((k) => kinds[k]).map((k) => `<h4>${esc(k)}</h4>` + kinds[k].map((t) =>
-    `<label class="opt"><input type="checkbox" data-tag="${t.id}" ${state.tagSel.has(String(t.id)) ? "checked" : ""}> ${esc(t.name)}<span class="n">${t.count}</span></label>`).join("")).join("");
-  const groups = Object.entries(filterGroups());
-  $("#f-dtrpg").innerHTML = groups.length ? "<h4>DriveThruRPG categories</h4>" + groups.map(([g, items]) =>
-    `<details ${g === "Genre" || g === "Rule System" ? "open" : ""}><summary>${esc(g)}</summary>` + items.map((f) =>
-      `<label class="opt" style="padding-left:${f.depth * 12}px"><input type="checkbox" data-filter="${esc(f.id)}" ${state.filterSel.has(f.id) ? "checked" : ""}> ${esc(f.name)}<span class="n">${f.count}</span></label>`).join("") + "</details>").join("") : "";
-  $$("#f-tags input").forEach((i) => i.addEventListener("change", () => { toggle(state.tagSel, i.dataset.tag, i.checked); reload(); }));
-  $$("#f-dtrpg input").forEach((i) => i.addEventListener("change", () => { toggle(state.filterSel, i.dataset.filter, i.checked); reload(); }));
+  return state.meta.tag_kinds.filter((k) => kinds[k]).map((k) => {
+    const opts = kinds[k].slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+    const cur = opts.find((t) => sel.has(String(t.id)));
+    return `<label>${esc(KIND_LABEL[k] || k)} <select data-kind="${esc(k)}"><option value="">Any</option>${opts.map((t) =>
+      `<option value="${t.id}" ${cur && cur.id === t.id ? "selected" : ""}>${esc(t.name)} (${t.count})</option>`).join("")}</select></label>`;
+  }).join("");
+}
+function filterDropdowns(sel) {
+  return Object.entries(filterGroups()).map(([g, items]) => {
+    const cur = items.find((f) => sel.has(String(f.id)));
+    return `<label>${esc(g)} <select data-group="${esc(g)}"><option value="">Any</option>${items.map((f) =>
+      `<option value="${esc(f.id)}" ${cur && cur.id === f.id ? "selected" : ""}>${"\u2003".repeat(f.depth)}${esc(f.name)} (${f.count})</option>`).join("")}</select></label>`;
+  }).join("");
+}
+function bindDropdowns(root, sel, attr, onChange) {
+  $$(`select[${attr}]`, root).forEach((s) => s.addEventListener("change", () => {
+    [...s.options].forEach((o) => o.value && sel.delete(o.value));  // one choice per dropdown
+    if (s.value) sel.add(s.value);
+    onChange();
+  }));
+}
+function renderFacets() {
+  $("#f-tags").innerHTML = state.meta.tags.length ? "<h4>Your tags</h4>" + tagDropdowns(state.tagSel) : "";
+  const groups = filterDropdowns(state.filterSel);
+  $("#f-dtrpg").innerHTML = groups ? "<h4>DriveThruRPG categories</h4>" + groups : "";
+  bindDropdowns($("#f-tags"), state.tagSel, "data-kind", reload);
+  bindDropdowns($("#f-dtrpg"), state.filterSel, "data-group", reload);
 }
 const toggle = (set, v, on) => (on ? set.add(v) : set.delete(v));
 
@@ -266,13 +287,15 @@ document.addEventListener("keydown", (e) => e.key === "Escape" && !$("#drawer").
 
 // ---------- suggestion ----------
 function renderSuggestTags() {
-  $("#s-tags").innerHTML = state.meta.tags.map((t) => `<span class="chip ${esc(t.kind)} ${state.sTags.has(String(t.id)) ? "on" : ""}" data-id="${t.id}">${esc(t.kind)}: ${esc(t.name)}</span>`).join("") || `<span class="hint">Add tags to products first</span>`;
-  $$("#s-tags .chip").forEach((c) => c.addEventListener("click", () => { const on = !state.sTags.has(c.dataset.id); toggle(state.sTags, c.dataset.id, on); c.classList.toggle("on", on); }));
+  $("#s-tags").innerHTML = tagDropdowns(state.sTags);
+  $("#s-filters").innerHTML = filterDropdowns(state.sFilters).replace(/<label>/g, "<label>DTRPG ");
+  bindDropdowns($("#s-tags"), state.sTags, "data-kind", () => {});
+  bindDropdowns($("#s-filters"), state.sFilters, "data-group", () => {});
 }
 $("#roll").addEventListener("click", async () => {
   const p = new URLSearchParams();
   state.sTags.forEach((t) => p.append("tag", t));
-  if ($("#s-filter").value) p.set("filter", $("#s-filter").value);
+  state.sFilters.forEach((f) => p.append("filter", f));
   [...$("#s-status").selectedOptions].forEach((o) => p.append("status", o.value));
   if ($("#s-type").value) p.set("product_type", $("#s-type").value);
   if ($("#s-players").value) p.set("players", $("#s-players").value);
