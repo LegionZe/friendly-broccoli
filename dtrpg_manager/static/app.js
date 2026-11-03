@@ -338,7 +338,7 @@ async function pollJobs() {
   clearTimeout(jobTimer);
   const jobs = await api("/api/jobs").catch(() => []);
   $("#jobs").innerHTML = jobs.map((j) => `<div class="job ${j.state}"><b>${esc(j.kind)}</b> — ${esc(j.state)} (started ${esc(j.started)})
-    ${j.state === "running" ? `<button class="secondary" data-cancel="${esc(j.id)}">Stop</button>` : ""}<pre>${esc(j.log.join("\n"))}</pre></div>`).join("") || `<p class="hint">No jobs yet.</p>`;
+    ${j.state === "running" ? `<button class="secondary" data-cancel="${esc(j.id)}">Stop</button>` : ""}<pre title="newest first">${esc(j.log.slice().reverse().join("\n"))}</pre></div>`).join("") || `<p class="hint">No jobs yet.</p>`;
   $$("[data-cancel]").forEach((b) => b.addEventListener("click", () => api(`/api/jobs/${b.dataset.cancel}/cancel`, { method: "POST", body: {} }).then(() => toast("Stopping…")).catch(fail)));
   if (jobs.some((j) => j.state === "running")) jobTimer = setTimeout(pollJobs, 1500);
   else if (jobs.length) { loadMeta(); loadLibrary(); }
