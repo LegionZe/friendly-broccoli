@@ -14,9 +14,30 @@ The app has a browser UI served on `127.0.0.1` only, and a CLI.
 
 Requires Python 3.10+.
 
+Ubuntu 23.04+ and Debian 12+ block `pip install` into the system Python ([PEP 668](https://peps.python.org/pep-0668/), "externally-managed-environment"). Install into a virtual environment instead.
+
+**Option A — virtual environment (recommended for a git checkout):**
+
 ```bash
-pip install -e .
+sudo apt install python3-venv python3-full
+cd friendly-broccoli
+python3 -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/dtrpg-manager serve
 ```
+
+Or run `source .venv/bin/activate` once per terminal, then use `dtrpg-manager` directly.
+
+**Option B — pipx (puts `dtrpg-manager` on PATH globally):**
+
+```bash
+sudo apt install pipx
+pipx ensurepath          # then open a new terminal
+pipx install ./friendly-broccoli
+dtrpg-manager serve
+```
+
+On Windows and macOS, `python -m venv .venv` works the same way.
 
 ## Get an API key
 
