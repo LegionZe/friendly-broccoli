@@ -122,9 +122,29 @@ def normalize_filters(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return list(out.values())
 
 
+# Relative image paths ("385/13617.jpg") resolve here. Verified 2026-11-03:
+# https://www.drivethrurpg.com/images/385/13617.jpg 301-redirects to this host.
+IMAGE_BASE = "https://d1vzi28wh99zvq.cloudfront.net/images/"
+
+
+def _image(v: Any) -> str | None:
+    if not v:
+        return None
+    v = str(v)
+    return v if v.startswith(("http://", "https://")) else IMAGE_BASE + v.lstrip("/")
+
+
 def normalize_product(raw: dict[str, Any]) -> dict[str, Any]:
+    """Field locations verified against a live vBeta response on 2026-11-03:
+    top-level ``orderProductId``, ``productId``, ``name``, ``publisher.name``,
+    ``fileLastModified``, ``archived``, ``files[]`` (``index``, ``filename``,
+    ``size``, ``checksums``), ``filters[]`` (``filterId``, ``parentFilterId``,
+    ``name``, ``parentName``), ``order.dateCreated`` (``datePurchased`` was
+    always null), and ``product.{image, thumbnail, description.{slug,
+    shortDescription}}``. Older/alternative names remain as fallbacks.
+    """
     opid = first(raw, "orderProductId", "order_product_id", "id")
-    pid = first(raw, "productId", "products_id", "product_id")
+    pid = first(raw, "productId", "products_id", "product_id", "product.productId")
     if opid is None:
         opid = pid
     if opid is None:
@@ -133,26 +153,19 @@ def normalize_product(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "order_product_id": str(opid),
         "product_id": str(pid) if pid is not None else None,
-        "name": _text(first(raw, "name", "products_name", "productName")) or f"Product {opid}",
+        "name": _text(first(raw, "name", "products_name", "productName", "product.description.name")) or f"Product {opid}",
         "publisher": _text(
             raw["publisher"].get("name")
             if isinstance(raw.get("publisher"), dict)
             else first(raw, "publisherName", "publishers_name", "publisher")
         ),
-        "date_purchased": first(raw, "datePurchased", "date_purchased", "orderDate", "purchaseDate"),
+        "date_purchased": first(raw, "datePurchased", "order.dateCreated", "date_purchased", "orderDate"),
         "file_last_modified": first(raw, "fileLastModified", "last_modified", "lastModified"),
         "archived": 1 if str(archived).lower() in ("1", "true") else 0,
-        "cover_url": first(
-            raw,
-            "cover_url_fullsize",
-            "coverUrlFullsize",
-            "cover_url",
-            "coverUrl",
-            "cover",
-            "image",
-            "thumbnail",
-            "products_thumbnail100",
-        ),
+        "cover_url": _image(first(raw, "product.image", "cover_url_fullsize", "coverUrl", "cover_url", "image")),
+        "thumb_url": _image(first(raw, "product.thumbnail", "cover_url", "thumbnail", "products_thumbnail100")),
+        "description": _text(first(raw, "product.description.shortDescription", "shortDescription", "description")),
+        "slug": first(raw, "product.description.slug", "slug"),
         "files": normalize_files(raw),
         "filters": normalize_filters(raw),
     }

@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .api import ApiError, DtrpgApi
+from .api import USER_AGENT, ApiError, DtrpgApi
 from .config import Config
 from .db import Library, now
 from .normalize import normalize_product, safe_path_part
@@ -129,7 +129,7 @@ def download_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".part")
     own_client = http is None
-    http = http or httpx.Client(timeout=120.0, follow_redirects=True)
+    http = http or httpx.Client(timeout=120.0, follow_redirects=True, headers={"User-Agent": USER_AGENT})
     h = hashlib.md5()
     try:
         with http.stream("GET", info["url"], follow_redirects=True) as resp:
@@ -256,7 +256,9 @@ def download_many(
     state = {"consecutive": 0, "paused": False, "abort": None, "detail_logged": False}
     own_api, own_http = api is None, http is None
     api = api or DtrpgApi(cfg.api_key, read_timeout=cfg.request_timeout)
-    http = http or httpx.Client(timeout=httpx.Timeout(300.0, connect=15.0), follow_redirects=True)
+    http = http or httpx.Client(
+        timeout=httpx.Timeout(300.0, connect=15.0), follow_redirects=True, headers={"User-Agent": USER_AGENT}
+    )
     pending = [f for f in files if force or needs_download(
         target_path(cfg, f["product_name"], f.get("publisher"), f["filename"]), f,
         f.get("file_last_modified"), cfg.validate_checksums) is not None]

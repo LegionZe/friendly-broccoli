@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 API_URL = "https://api.drivethrurpg.com/api/vBeta/"
 DRIVETHRU_SITE_ID = 10  # value used by glujan/drpg (DriveThruSite.DEFAULT)
 RETRY_STATUSES = {429, 502, 503, 504}
+# Honest, self-identifying client name for every request (API and file downloads).
+USER_AGENT = "dtrpg-manager/0.1 (+https://github.com/LegionZe/friendly-broccoli)"
 
 
 class ApiError(Exception):
@@ -72,7 +74,7 @@ class DtrpgApi:
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": "dtrpg-manager/0.1",
+                "User-Agent": USER_AGENT,
             },
         )
 

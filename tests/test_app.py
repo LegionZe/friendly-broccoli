@@ -290,3 +290,50 @@ def test_httpx_logging_silenced(cfg, tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "cmd_export", lambda a: 0)
     cli.main(["--config", str(tmp_path / "c.json"), "export", "x.json"])
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+
+
+# Layout of a live vBeta order_products item (2026-11-03); values are invented.
+LIVE_SHAPE = {
+    "orderId": 1, "productId": 13617, "name": "Sample Game", "datePurchased": None, "archived": 0,
+    "orderProductId": 5091002, "fileLastModified": "2006-08-29T00:00:00-05:00",
+    "files": [{"index": 0, "filename": "sample.pdf", "size": 4266490, "sizeMB": "4.27",
+               "checksums": [{"checksum": "abc", "checksumDate": "2021-08-14T19:01:33-05:00"}]}],
+    "filters": [
+        {"filterId": 100, "parentFilterId": 10, "name": "Fantasy", "parentName": "Genre"},
+        {"filterId": 120, "parentFilterId": 100, "name": "Dark Fantasy", "parentName": "Genre"},
+        {"filterId": 1840, "parentFilterId": 1800, "name": "Chronicles of Darkness", "parentName": "Rule System"},
+    ],
+    "publisher": {"name": "Sample Press", "publisherId": 385, "slug": "sample-press"},
+    "product": {"image": "385/13617.jpg", "thumbnail": "385/13617-thumb140.jpg",
+                "description": {"name": "Sample Game Classic", "slug": "sample-game", "shortDescription": "A test."}},
+    "order": {"dateCreated": "2010-03-08T04:11:05-06:00", "orderId": 1},
+}
+
+
+def test_live_shape():
+    r = normalize_product(LIVE_SHAPE)
+    assert r["date_purchased"] == "2010-03-08T04:11:05-06:00"
+    assert r["cover_url"] == "https://d1vzi28wh99zvq.cloudfront.net/images/385/13617.jpg"
+    assert r["thumb_url"].endswith("385/13617-thumb140.jpg")
+    assert r["description"] == "A test." and r["slug"] == "sample-game"
+    assert r["files"][0]["size"] == 4266490
+    dark = next(f for f in r["filters"] if f["name"] == "Dark Fantasy")
+    assert dark == {"id": "120", "name": "Dark Fantasy", "parent_id": "100", "group_name": "Genre"}
+    lib = Library(":memory:")
+    lib.upsert_product(r, LIVE_SHAPE)
+    assert lib.search({"filter_ids": ["100"]})["total"] == 1  # parent matches descendants
+    assert lib.search({"q": "A test"})["total"] == 1  # description searchable
+
+
+def test_migration_adds_columns(tmp_path):
+    import sqlite3
+    db = tmp_path / "old.sqlite3"
+    c = sqlite3.connect(db)
+    c.executescript("CREATE TABLE products (order_product_id TEXT PRIMARY KEY, product_id TEXT, name TEXT NOT NULL,"
+                    " publisher TEXT, date_purchased TEXT, file_last_modified TEXT, archived INTEGER NOT NULL DEFAULT 0,"
+                    " cover_url TEXT, raw_json TEXT, first_seen TEXT NOT NULL, last_synced TEXT NOT NULL,"
+                    " removed INTEGER NOT NULL DEFAULT 0);")
+    c.close()
+    lib = Library(db)
+    lib.upsert_product(normalize_product(LIVE_SHAPE), LIVE_SHAPE)
+    assert lib.product("5091002")["thumb_url"]

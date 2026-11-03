@@ -48,16 +48,24 @@ async function loadMeta() {
   renderFacets();
   renderSuggestTags();
 }
+// DTRPG categories: each filter has parent_id (immediate parent) and
+// group_name (top-level group: Genre, Rule System, Product Type, Format...).
+// Intermediate parents are not always present in the data, so a filter whose
+// parent is unknown is shown at the top of its group.
+const GROUP_ORDER = ["Genre", "Rule System", "Product Type", "Format"];
+function filterGroups() {
+  const fl = state.meta.dtrpg_filters, ids = new Set(fl.map((f) => f.id)), byParent = {}, groups = {};
+  fl.forEach((f) => (byParent[f.parent_id && ids.has(f.parent_id) ? f.parent_id : "root:" + (f.group_name || "Other")] ||= []).push(f));
+  const walk = (key, depth, out) => (byParent[key] || []).forEach((f) => { out.push({ ...f, depth }); walk(f.id, depth + 1, out); });
+  [...new Set(fl.map((f) => f.group_name || "Other"))]
+    .sort((a, b) => ((GROUP_ORDER.indexOf(a) + 1 || 99) - (GROUP_ORDER.indexOf(b) + 1 || 99)) || a.localeCompare(b))
+    .forEach((g) => { groups[g] = []; walk("root:" + g, 0, groups[g]); });
+  return groups;
+}
 function filterTreeOptions() {
-  const fl = state.meta.dtrpg_filters, byParent = {};
-  fl.forEach((f) => (byParent[f.parent_id || ""] ||= []).push(f));
-  const ids = new Set(fl.map((f) => f.id)), out = [];
-  const walk = (pid, depth) => (byParent[pid] || []).forEach((f) => {
-    out.push([f.id, `${"— ".repeat(depth)}${f.group_name && !depth ? f.group_name + ": " : ""}${f.name} (${f.count})`]);
-    walk(f.id, depth + 1);
-  });
-  walk("", 0);
-  fl.filter((f) => f.parent_id && !ids.has(f.parent_id)).forEach((f) => { out.push([f.id, `${f.name} (${f.count})`]); walk(f.id, 1); });
+  const out = [];
+  Object.entries(filterGroups()).forEach(([g, items]) => items.forEach((f) =>
+    out.push([f.id, `${g}: ${"— ".repeat(f.depth)}${f.name} (${f.count})`])));
   return out;
 }
 function renderFacets() {
@@ -65,9 +73,10 @@ function renderFacets() {
   state.meta.tags.forEach((t) => (kinds[t.kind] ||= []).push(t));
   $("#f-tags").innerHTML = state.meta.tag_kinds.filter((k) => kinds[k]).map((k) => `<h4>${esc(k)}</h4>` + kinds[k].map((t) =>
     `<label class="opt"><input type="checkbox" data-tag="${t.id}" ${state.tagSel.has(String(t.id)) ? "checked" : ""}> ${esc(t.name)}<span class="n">${t.count}</span></label>`).join("")).join("");
-  const fl = filterTreeOptions();
-  $("#f-dtrpg").innerHTML = fl.length ? "<h4>DriveThruRPG categories</h4>" + fl.map(([id, label]) =>
-    `<label class="opt"><input type="checkbox" data-filter="${esc(id)}" ${state.filterSel.has(id) ? "checked" : ""}> ${esc(label)}</label>`).join("") : "";
+  const groups = Object.entries(filterGroups());
+  $("#f-dtrpg").innerHTML = groups.length ? "<h4>DriveThruRPG categories</h4>" + groups.map(([g, items]) =>
+    `<details ${g === "Genre" || g === "Rule System" ? "open" : ""}><summary>${esc(g)}</summary>` + items.map((f) =>
+      `<label class="opt" style="padding-left:${f.depth * 12}px"><input type="checkbox" data-filter="${esc(f.id)}" ${state.filterSel.has(f.id) ? "checked" : ""}> ${esc(f.name)}<span class="n">${f.count}</span></label>`).join("") + "</details>").join("") : "";
   $$("#f-tags input").forEach((i) => i.addEventListener("change", () => { toggle(state.tagSel, i.dataset.tag, i.checked); reload(); }));
   $$("#f-dtrpg input").forEach((i) => i.addEventListener("change", () => { toggle(state.filterSel, i.dataset.filter, i.checked); reload(); }));
 }
@@ -88,14 +97,15 @@ function libraryParams() {
   return p;
 }
 function card(p, selectable = true) {
-  const cover = p.cover_url ? `style="background-image:url('${esc(p.cover_url)}')"` : "";
+  const img = p.thumb_url || p.cover_url;
+  const cover = img ? `style="background-image:url('${esc(img)}')"` : "";
   const dl = p.file_count ? `<span class="badge" title="files downloaded">${p.downloaded_count ?? 0}/${p.file_count}</span>` : "";
   const fav = p.favourite ? `<span class="badge">★</span>` : "";
   const rating = p.rating ? `<span class="badge">${"★".repeat(p.rating)}</span>` : "";
   return `<div class="card" data-id="${esc(p.order_product_id)}">
     ${selectable ? `<input type="checkbox" class="sel" ${state.selected.has(p.order_product_id) ? "checked" : ""}>` : ""}
     <div class="badges">${fav}${rating}${dl}</div>
-    <div class="cover" ${cover}>${p.cover_url ? "" : "📘"}</div>
+    <div class="cover" ${cover}>${img ? "" : "📘"}</div>
     <div class="body"><div class="title">${esc(p.name)}</div><div class="pub">${esc(p.publisher || "")} · ${esc(p.status)}</div>
     <div class="chips">${(p.tags || []).map((t) => `<span class="chip ${esc(t.kind)}">${esc(t.name)}</span>`).join("")}</div></div></div>`;
 }
@@ -150,12 +160,13 @@ async function openProduct(id) {
   if (!p) return;
   const m = state.meta;
   const opt = (vals, cur) => vals.map((v) => `<option ${v === cur ? "selected" : ""}>${esc(v)}</option>`).join("");
-  const dtrpgLink = p.product_id ? `<a href="https://www.drivethrurpg.com/en/product/${encodeURIComponent(p.product_id)}" target="_blank" rel="noopener">View on DriveThruRPG ↗</a>` : "";
+  const dtrpgLink = p.product_id ? `<a href="https://www.drivethrurpg.com/en/product/${encodeURIComponent(p.product_id)}${p.slug ? "/" + encodeURIComponent(p.slug) : ""}" target="_blank" rel="noopener">View on DriveThruRPG ↗</a>` : "";
   $("#drawer-body").innerHTML = `
     <div class="detail-head">${p.cover_url ? `<img src="${esc(p.cover_url)}" alt="">` : ""}
       <div><h2>${esc(p.name)}</h2><div class="hint">${esc(p.publisher || "")}</div>
       <div class="hint">Purchased: ${esc(p.date_purchased || "unknown")} · Files updated: ${esc(p.file_last_modified || "unknown")}${p.archived ? " · archived" : ""}</div>
       <div>${dtrpgLink}</div>
+      ${p.description ? `<p class="desc">${esc(p.description)}</p>` : ""}
       <div class="stars" id="d-stars">${[1, 2, 3, 4, 5].map((n) => `<span data-n="${n}" class="${(p.rating || 0) >= n ? "on" : ""}">★</span>`).join("")}</div>
       <label class="check"><input type="checkbox" id="d-fav" ${p.favourite ? "checked" : ""}> Favourite</label>
       <label class="check"><input type="checkbox" id="d-excl" ${p.exclude_random ? "checked" : ""}> Exclude from random picks</label></div></div>
@@ -169,7 +180,7 @@ async function openProduct(id) {
     <div class="chips" id="d-tags"></div>
     <div class="add-tag"><select id="d-kind">${m.tag_kinds.map((k) => `<option>${k}</option>`).join("")}</select>
       <input id="d-tagname" list="tag-names" placeholder="e.g. horror, D&D 5e, Forgotten Realms"><button id="d-addtag">Add</button></div>
-    ${p.dtrpg_filters.length ? `<h3>DriveThruRPG categories</h3><div class="chips">${p.dtrpg_filters.map((f) => `<span class="chip dtrpg">${f.group ? esc(f.group) + ": " : ""}${esc(f.name)}</span>`).join("")}</div>` : ""}
+    ${p.dtrpg_filters.length ? `<h3>DriveThruRPG categories</h3><div class="chips">${p.dtrpg_filters.slice().sort((a, b) => ((GROUP_ORDER.indexOf(a.group) + 1 || 99) - (GROUP_ORDER.indexOf(b.group) + 1 || 99))).map((f) => `<span class="chip dtrpg">${f.group ? esc(f.group) + ": " : ""}${esc(f.name)}</span>`).join("")}</div>` : ""}
     <label>Notes <textarea id="d-notes" rows="4">${esc(p.notes || "")}</textarea></label>
     <h3>Files</h3>
     <table class="files">${p.files.map((f) => `<tr><td>${esc(f.filename)}</td><td>${f.size ? (f.size / 1048576).toFixed(1) + " MB" : ""}</td>

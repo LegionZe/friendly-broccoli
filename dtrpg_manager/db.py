@@ -113,6 +113,14 @@ class Library:
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(products)")}
+        for col in ("thumb_url", "description", "slug"):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -135,17 +143,22 @@ class Library:
             is_new = c.execute("SELECT 1 FROM products WHERE order_product_id=?", (opid,)).fetchone() is None
             c.execute(
                 """INSERT INTO products (order_product_id, product_id, name, publisher, date_purchased,
-                       file_last_modified, archived, cover_url, raw_json, first_seen, last_synced, removed)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,0)
+                       file_last_modified, archived, cover_url, thumb_url, description, slug,
+                       raw_json, first_seen, last_synced, removed)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
                    ON CONFLICT(order_product_id) DO UPDATE SET
                        product_id=excluded.product_id, name=excluded.name, publisher=excluded.publisher,
                        date_purchased=COALESCE(excluded.date_purchased, products.date_purchased),
                        file_last_modified=excluded.file_last_modified, archived=excluded.archived,
                        cover_url=COALESCE(excluded.cover_url, products.cover_url),
+                       thumb_url=COALESCE(excluded.thumb_url, products.thumb_url),
+                       description=COALESCE(excluded.description, products.description),
+                       slug=COALESCE(excluded.slug, products.slug),
                        raw_json=excluded.raw_json, last_synced=excluded.last_synced, removed=0""",
                 (
                     opid, rec["product_id"], rec["name"], rec["publisher"], rec["date_purchased"],
                     rec["file_last_modified"], rec["archived"], rec["cover_url"],
+                    rec.get("thumb_url"), rec.get("description"), rec.get("slug"),
                     json.dumps(raw, ensure_ascii=False), ts, ts,
                 ),
             )
@@ -299,8 +312,8 @@ class Library:
         if not f.get("include_archived"):
             clauses.append("p.archived=0")
         if q := (f.get("q") or "").strip():
-            clauses.append("(p.name LIKE ? OR p.publisher LIKE ? OR m.notes LIKE ?)")
-            args += [f"%{q}%"] * 3
+            clauses.append("(p.name LIKE ? OR p.publisher LIKE ? OR m.notes LIKE ? OR p.description LIKE ?)")
+            args += [f"%{q}%"] * 4
         if pub := f.get("publisher"):
             clauses.append("p.publisher=?")
             args.append(pub)
@@ -359,7 +372,7 @@ class Library:
         total = self._q(f"SELECT COUNT(*) AS n {base}", args)[0]["n"]
         rows = self._q(
             f"""SELECT p.order_product_id, p.product_id, p.name, p.publisher, p.date_purchased,
-                       p.file_last_modified, p.archived, p.cover_url, m.*,
+                       p.file_last_modified, p.archived, p.cover_url, p.thumb_url, p.description, p.slug, m.*,
                        (SELECT COUNT(*) FROM files x WHERE x.order_product_id=p.order_product_id) AS file_count,
                        (SELECT COUNT(*) FROM files x WHERE x.order_product_id=p.order_product_id AND x.local_path IS NOT NULL) AS downloaded_count
                 {base} ORDER BY {order} LIMIT ? OFFSET ?""",

@@ -114,3 +114,5 @@ details pre { white-space: pre-wrap; font-size: 11px; max-height: 300px; overflo
   .meta-grid { grid-template-columns: 1fr; }
   .detail-head { flex-direction: column; }
 }
+.facet details summary { cursor: pointer; font-size: 13px; font-weight: 600; margin: 6px 0 2px; }
+.desc { color: var(--muted); font-size: 13px; margin: 6px 0; }
