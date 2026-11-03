@@ -29,6 +29,8 @@ class Config:
     include_archived: bool = False
     threads: int = 3
     page_size: int = 50
+    fetch_filters: bool = True  # getFilters=1: DTRPG categories; slower server-side
+    request_timeout: int = 120  # seconds to wait for an API response
 
     _path: Path | None = field(default=None, repr=False, compare=False)
     _file_key: str = field(default="", repr=False, compare=False)

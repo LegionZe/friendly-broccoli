@@ -39,7 +39,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
     if args.archived:
         cfg.include_archived = True
-    with DtrpgApi(cfg.api_key) as api:
+    if args.no_filters:
+        cfg.fetch_filters = False
+    with DtrpgApi(cfg.api_key, read_timeout=cfg.request_timeout) as api:
         sync_library(api, Library(cfg.db_path), cfg)
     return 0
 
@@ -89,7 +91,7 @@ def cmd_suggest(args: argparse.Namespace) -> int:
 def cmd_diagnose(args: argparse.Namespace) -> int:
     """Dump raw API JSON so the real field structure (filters etc.) can be inspected."""
     cfg = _cfg(args)
-    with DtrpgApi(cfg.api_key) as api:
+    with DtrpgApi(cfg.api_key, read_timeout=cfg.request_timeout) as api:
         auth = api.authenticate()
         page = api.products_page(1, args.count, archived=False, filters=True)
     out = {
@@ -159,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("sync", help="fetch product list + metadata into the local database")
     s.add_argument("--archived", action="store_true", help="also fetch archived products")
+    s.add_argument("--no-filters", action="store_true", help="skip DTRPG category data (faster)")
     s.set_defaults(fn=cmd_sync)
 
     s = sub.add_parser("download", help="download new/updated files")

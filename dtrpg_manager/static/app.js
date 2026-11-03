@@ -256,11 +256,13 @@ async function loadSettings() {
   f.api_key.value = ""; f.api_key.placeholder = c.api_key_set ? `saved (${c.api_key})` : "paste your application key";
   f.library_path.value = c.library_path; f.threads.value = c.threads;
   f.omit_publisher.checked = c.omit_publisher; f.validate_checksums.checked = c.validate_checksums; f.include_archived.checked = c.include_archived;
+  f.fetch_filters.checked = c.fetch_filters; f.request_timeout.value = c.request_timeout;
 }
 $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target, body = { library_path: f.library_path.value, threads: +f.threads.value || 3,
-    omit_publisher: f.omit_publisher.checked, validate_checksums: f.validate_checksums.checked, include_archived: f.include_archived.checked };
+    omit_publisher: f.omit_publisher.checked, validate_checksums: f.validate_checksums.checked, include_archived: f.include_archived.checked,
+    fetch_filters: f.fetch_filters.checked, request_timeout: +f.request_timeout.value || 120 };
   if (f.api_key.value) body.api_key = f.api_key.value.trim();
   await api("/api/config", { method: "PATCH", body }).then(() => toast("Settings saved")).catch(fail);
   loadSettings();

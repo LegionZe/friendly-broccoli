@@ -82,6 +82,8 @@ The older `/api/v1/` endpoints documented in [jramboz/DTRPG_API](https://github.
 1. Run `dtrpg-manager diagnose -o diagnostic.json` and inspect the product objects. Each product's raw JSON is also visible under **Raw API data** in its detail panel.
 2. If categories or covers are missing, adjust the key lists in `dtrpg_manager/normalize.py` and run `dtrpg-manager reparse`. No re-download is needed.
 
+**Slow product list.** The authenticated `order_products` call can take longer than 30 seconds to respond (a `ReadTimeout` at 30 s was reported on 2026-11-03). The client now waits up to 120 s (`request_timeout`) and uses HTTP/2, as drpg does. If a page still times out, it retries without `getFilters` and then with smaller pages. Category fetching can be switched off in Settings or with `dtrpg-manager sync --no-filters`.
+
 An invalid key returns HTTP 496 `{"error":{"message":"Invalid application key."}}` (observed 2026-11-03).
 
 ## Development

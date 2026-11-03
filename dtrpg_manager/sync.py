@@ -29,7 +29,9 @@ def sync_library(api: DtrpgApi, lib: Library, cfg: Config, progress: Callable[[s
     new = 0
     for archived in (False, True) if cfg.include_archived else (False,):
         progress("Fetching archived products" if archived else "Fetching library")
-        for raw in api.iter_products(cfg.page_size, archived=archived):
+        for raw in api.iter_products(
+            cfg.page_size, archived=archived, filters=cfg.fetch_filters, progress=progress
+        ):
             try:
                 rec = normalize_product(raw)
             except ValueError as e:
@@ -39,8 +41,6 @@ def sync_library(api: DtrpgApi, lib: Library, cfg: Config, progress: Callable[[s
                 rec["archived"] = 1
             new += lib.upsert_product(rec, raw)
             seen.add(rec["order_product_id"])
-            if len(seen) % 50 == 0:
-                progress(f"{len(seen)} products processed")
     removed = lib.mark_removed_except(seen, cfg.include_archived)
     summary = {"seen": len(seen), "new": new, "removed": removed}
     progress(f"Sync complete: {summary}")
@@ -175,7 +175,7 @@ def download_many(
 ) -> dict[str, int]:
     counts = {"downloaded": 0, "up to date": 0, "failed": 0}
     lock = threading.Lock()
-    with DtrpgApi(cfg.api_key) as api, httpx.Client(timeout=120.0, follow_redirects=True) as http:
+    with DtrpgApi(cfg.api_key, read_timeout=cfg.request_timeout) as api, httpx.Client(timeout=120.0, follow_redirects=True) as http:
         api.authenticate()
 
         def one(f: dict[str, Any]) -> None:

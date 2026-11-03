@@ -157,7 +157,7 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
             return jsonify(error="A sync is already running"), 409
 
         def run(log):
-            with DtrpgApi(cfg.api_key) as api:
+            with DtrpgApi(cfg.api_key, read_timeout=cfg.request_timeout) as api:
                 return sync_library(api, lib, cfg, log)
 
         return jsonify(job=jobs.start("sync", run))
@@ -199,7 +199,7 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
     def set_config():
         body = request.get_json()
         allowed = {"api_key", "library_path", "omit_publisher", "validate_checksums",
-                   "include_archived", "threads", "page_size"}
+                   "include_archived", "threads", "page_size", "fetch_filters", "request_timeout"}
         for k, v in body.items():
             if k not in allowed:
                 raise ValueError(f"Unknown setting {k}")

@@ -179,3 +179,42 @@ def test_web_api(api, lib, cfg):
     assert lib2.import_metadata(exported) == 2
     assert lib2.product("1")["status"] == "want-to-play"
     assert "genre" in client.get("/api/export.csv").get_data(as_text=True).splitlines()[0]
+
+
+def _many(n):
+    return [{"orderProductId": i, "productId": str(i), "name": f"P{i}", "files": []} for i in range(1, n + 1)]
+
+
+def test_timeout_falls_back_without_filters_then_smaller_pages():
+    data = _many(23)
+    calls = []
+
+    def h(request):
+        if request.url.path.endswith("/auth_key"):
+            return httpx.Response(200, json={"token": "T"})
+        p = request.url.params
+        calls.append((p["getFilters"], p["pageSize"], p["page"]))
+        if p["getFilters"] == "1" or int(p["pageSize"]) > 10:
+            raise httpx.ReadTimeout("slow", request=request)
+        size, page = int(p["pageSize"]), int(p["page"])
+        return httpx.Response(200, json=data[(page - 1) * size: page * size])
+
+    msgs = []
+    a = DtrpgApi("K", transport=httpx.MockTransport(h), backoff=0)
+    got = list(a.iter_products(50, progress=msgs.append))
+    assert [g["orderProductId"] for g in got] == list(range(1, 24))
+    assert any("without DriveThruRPG category" in m for m in msgs)
+    assert any("page size 6" in m for m in msgs)  # 50 -> 25 -> 12 -> 6
+
+
+def test_server_page_cap_does_not_truncate():
+    data = _many(23)
+
+    def h(request):
+        if request.url.path.endswith("/auth_key"):
+            return httpx.Response(200, json={"token": "T"})
+        page = int(request.url.params["page"])
+        return httpx.Response(200, json=data[(page - 1) * 10: page * 10])  # ignores pageSize=50
+
+    a = DtrpgApi("K", transport=httpx.MockTransport(h), backoff=0)
+    assert len(list(a.iter_products(50, progress=lambda m: None))) == 23
