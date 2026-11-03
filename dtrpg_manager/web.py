@@ -33,6 +33,8 @@ def _filters_from_args(args: Any) -> dict[str, Any]:
         "downloaded": args.get("downloaded"),
         "tag_ids": args.getlist("tag"),
         "filter_ids": args.getlist("filter"),
+        "any_tag_ids": args.getlist("any_tag"),
+        "any_filter_ids": args.getlist("any_filter"),
         "untagged": args.get("untagged") in ("1", "true"),
         "include_archived": args.get("include_archived") in ("1", "true"),
         "sort": args.get("sort"),

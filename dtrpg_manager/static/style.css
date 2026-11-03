@@ -74,7 +74,14 @@ label.check input { width: auto; margin: 0; }
 .chip.setting { background: var(--setting); } .chip.category { background: var(--category); }
 .chip.dtrpg { background: transparent; border: 1px solid var(--line); color: var(--muted); }
 .chip button { background: none; border: none; color: inherit; padding: 0; font-size: 12px; }
-.tag-selects { display: contents; }  /* its labels sit directly in the suggest-form grid */
+.tag-selects { display: contents; }
+.pick-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.pick-group { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px; }
+.pick-group h3 { margin: 0 0 6px; font-size: 14px; }
+.pick-group .picked { min-height: 24px; margin-bottom: 6px; }
+.pick-adders { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0 8px; }
+.pick-adders label { margin: 4px 0; }
+@media (max-width: 760px) { .pick-groups { grid-template-columns: 1fr; } }  /* its labels sit directly in the suggest-form grid */
 .facet select option { font-size: 13px; }
 .chips-select { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .chips-select .chip { cursor: pointer; user-select: none; opacity: .55; }

@@ -586,6 +586,29 @@ class Library:
                    SELECT 1 FROM product_dtrpg_filters pf WHERE pf.order_product_id=p.order_product_id AND pf.filter_id IN sub)"""
             )
             args.append(str(fid))
+        # "any one of": a product qualifies if it has at least one of these tags or
+        # categories (a category also matches its sub-categories)
+        any_tags = f.get("any_tag_ids") or []
+        any_filters = f.get("any_filter_ids") or []
+        if isinstance(any_tags, (str, int)):
+            any_tags = [any_tags]
+        if isinstance(any_filters, str):
+            any_filters = [any_filters]
+        if any_tags or any_filters:
+            ors: list[str] = []
+            if any_tags:
+                ors.append(
+                    "EXISTS (SELECT 1 FROM product_tags t WHERE t.order_product_id=p.order_product_id "
+                    f"AND t.tag_id IN ({','.join('?' * len(any_tags))}))"
+                )
+                args += [int(t) for t in any_tags]
+            for fid in any_filters:
+                ors.append(
+                    """EXISTS (WITH RECURSIVE sub(id) AS (SELECT ? UNION SELECT d.id FROM dtrpg_filters d JOIN sub ON d.parent_id=sub.id)
+                       SELECT 1 FROM product_dtrpg_filters pf WHERE pf.order_product_id=p.order_product_id AND pf.filter_id IN sub)"""
+                )
+                args.append(str(fid))
+            clauses.append("(" + " OR ".join(ors) + ")")
         if f.get("untagged"):
             clauses.append("NOT EXISTS (SELECT 1 FROM product_tags t WHERE t.order_product_id=p.order_product_id)")
         if f.get("for_random"):

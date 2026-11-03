@@ -715,3 +715,20 @@ def test_map_rules_wider():
     got = {(s["order_product_id"], s["name"]) for s in lib.suggestions({})["items"]}
     assert {("1", "floorplans"), ("1", "map"), ("2", "map"), ("4", "tokens")} <= got
     assert ("3", "map") not in got and not any(o == "5" for o, _ in got)
+
+
+def test_must_have_and_any_one_of():
+    lib = _lib_with([_prod(1, "Horror SF", GENRE_DARK), _prod(2, "Space"), _prod(3, "Western"), _prod(4, "Both")])
+    h = lib.get_or_create_tag("genre", "horror"); s = lib.get_or_create_tag("genre", "sci-fi")
+    solo = lib.get_or_create_tag("tag", "solo")
+    for opid, tid in (("1", h), ("1", s), ("2", s), ("4", h), ("4", solo)):
+        lib._x("INSERT INTO product_tags (order_product_id, tag_id) VALUES (?,?)", (opid, tid))
+    ids = lambda f: sorted(i["order_product_id"] for i in lib.search(f)["items"])
+    assert ids({"any_tag_ids": [h, s]}) == ["1", "2", "4"]                    # OR
+    assert ids({"tag_ids": [h, s]}) == ["1"]                                  # AND
+    assert ids({"tag_ids": [solo], "any_tag_ids": [h, s]}) == ["4"]           # must AND (any OR)
+    assert ids({"any_tag_ids": [s], "any_filter_ids": ["100"]}) == ["1", "2"]  # OR across tags + DTRPG (with descendants)
+    from dtrpg_manager.web import _filters_from_args
+    from werkzeug.datastructures import MultiDict
+    f = _filters_from_args(MultiDict([("any_tag", "3"), ("any_tag", "4"), ("tag", "1")]))
+    assert f["any_tag_ids"] == ["3", "4"] and f["tag_ids"] == ["1"]

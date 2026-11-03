@@ -68,9 +68,20 @@
     <div class="suggest-panel">
       <h2>What should we play?</h2>
       <p class="hint">Picks from your library using the filters below. Weighted mode favours favourites, “want-to-play” and unread items, and skips the last 10 suggestions.</p>
+      <div class="pick-groups">
+        <div class="pick-group" id="s-must">
+          <h3>Must have <span class="hint">— every one of these</span></h3>
+          <div class="picked chips"></div>
+          <div class="pick-adders"></div>
+        </div>
+        <div class="pick-group" id="s-any">
+          <h3>Any one of <span class="hint">— at least one of these</span></h3>
+          <div class="picked chips"></div>
+          <div class="pick-adders"></div>
+        </div>
+      </div>
       <div class="suggest-form">
-        <div id="s-tags" class="tag-selects"></div>
-        <div id="s-filters" class="tag-selects"></div>
+
         <label>Status
           <select id="s-status" multiple size="4"></select>
         </label>
