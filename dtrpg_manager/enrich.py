@@ -270,7 +270,8 @@ def extract_pdfs(
     try:
         from pypdf import PdfReader
     except ImportError as e:  # pragma: no cover
-        raise RuntimeError("pypdf is not installed: pip install pypdf") from e
+        import sys
+        raise RuntimeError(f"pypdf is not installed. Run: {sys.executable} -m pip install pypdf — then restart the app") from e
     logging.getLogger("pypdf").setLevel(logging.ERROR)
 
     rows = lib._q(

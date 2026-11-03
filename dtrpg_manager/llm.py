@@ -16,6 +16,7 @@ Results are only ever queued as suggestions (source ``llm``) for review.
 from __future__ import annotations
 
 import hashlib
+import sys
 import json
 import os
 from typing import Any
@@ -181,7 +182,12 @@ def make_client(api_key: str | None):
     try:
         import anthropic
     except ImportError as e:
-        raise RuntimeError("The anthropic package is not installed: pip install 'dtrpg-manager[llm]'") from e
+        # name the exact interpreter running the app (its venv), not a bare "pip",
+        # which on Debian/Ubuntu hits the system Python and fails (PEP 668)
+        raise RuntimeError(
+            f"The anthropic package is not installed. Run: {sys.executable} -m pip install anthropic "
+            "— then restart the app"
+        ) from e
     key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("Set an Anthropic API key in Settings (or ANTHROPIC_API_KEY)")

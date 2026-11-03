@@ -76,7 +76,7 @@ The **Auto-tag** page runs four passes. Each tag records where it came from (`ma
 | 3 · Read PDFs | Page count, PDF metadata and the first 3 pages' text of each product's largest downloaded PDF (`pypdf`, local) | feeds passes 2 and 4 |
 | 4 · AI (Claude Haiku 5.5) | Classifies thinly tagged products against your existing vocabulary, via the Message Batches API (50% price) with a JSON-schema response. Shows an estimated cost and asks for confirmation before submitting. | suggestions to review |
 
-The mapping and rules are editable on the same page and are stored in `enrich.json` next to `config.json`. Pass 4 needs `pip install -e .[llm]` and an Anthropic API key (Settings, or `ANTHROPIC_API_KEY`).
+The mapping and rules are editable on the same page and are stored in `enrich.json` next to `config.json`. Pass 4 needs the `anthropic` package in the app's virtual environment (`.venv/bin/pip install -e '.[llm]'`, then restart the app) and an Anthropic API key (Settings, or `ANTHROPIC_API_KEY`).
 
 ```bash
 dtrpg-manager enrich dtrpg
