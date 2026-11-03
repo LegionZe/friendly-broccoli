@@ -149,11 +149,22 @@ def test_download_checksum_and_traversal(api, lib, cfg):
     # "../" in a filename cannot escape the library folder
     evil = target_path(cfg, "Space Opera Core", "Star Co", "maps/../../evil.pdf")
     assert evil.parent.name == "Space Opera Core"
-    # checksum mismatch is rejected and leaves no file
-    bad = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=b"tampered")))
+    # by default a checksum that differs from DTRPG's (often stale) record is kept
+    other = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=b"%PDF-rewatermarked")))
+    path.unlink()
+    assert download_file(api, lib, cfg, files[("1", 0)], http=other) == "downloaded"
+    assert path.read_bytes() == b"%PDF-rewatermarked"
+    # strict mode rejects it and leaves no file
+    cfg.validate_checksums = True
     path.unlink()
     with pytest.raises(Exception, match="Checksum"):
-        download_file(api, lib, cfg, files[("1", 0)], http=bad)
+        download_file(api, lib, cfg, files[("1", 0)], http=other)
+    assert not path.exists()
+    # an HTML error page saved as .pdf is never accepted
+    cfg.validate_checksums = False
+    html = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=b"<html>oops")))
+    with pytest.raises(Exception, match="not a PDF"):
+        download_file(api, lib, cfg, files[("1", 0)], http=html)
     assert not path.exists()
 
 
@@ -270,6 +281,7 @@ def test_download_circuit_breaker_stops(api, lib, cfg):
 
     sync_library(api, lib, cfg, progress=lambda m: None)
     cfg.download_delay = 0
+    cfg.threads = 1  # sequential, so the hit count is deterministic
     files = [dict(f, idx=i, filename=f"f{i}.pdf", checksum=None) for i, f in enumerate(lib.all_files() * 10)]
     hits = []
 
@@ -563,3 +575,55 @@ def test_web_enrich_endpoints(cfg, tmp_path):
     conf = c.get("/api/enrich/config").get_json()
     assert c.put("/api/enrich/config", json=conf).status_code == 200
     assert (tmp_path / "enrich.json").exists()
+
+
+def test_adaptive_limit():
+    from dtrpg_manager.sync import AdaptiveLimit
+    lim = AdaptiveLimit(8, grow_after=2)
+    assert lim.pushback() == 4 and lim.pushback() == 2
+    assert lim.success() is None and lim.success() == 3
+    ev = threading.Event()
+    lim.acquire(ev); lim.acquire(ev); lim.acquire(ev)
+    assert lim.active == 3
+    for _ in range(3):
+        lim.release()
+
+
+def test_parallel_downloads_back_off_on_503(api, lib, cfg):
+    from dtrpg_manager.sync import download_many
+
+    sync_library(api, lib, cfg, progress=lambda m: None)
+    cfg.download_delay, cfg.threads, cfg.validate_checksums = 0, 4, False
+    files = [dict(f, idx=i, filename=f"f{i}.pdf", checksum=None, size=None)
+             for i, f in enumerate(lib.all_files() * 6)]
+    calls = {"n": 0}
+    lock = threading.Lock()
+
+    def flaky(r):
+        with lock:
+            calls["n"] += 1
+            n = calls["n"]
+        return httpx.Response(503, text="busy") if n in (2, 3) else httpx.Response(200, content=PDF)
+
+    msgs = []
+    res = download_many(cfg, lib, files, msgs.append, api=api,
+                        http=httpx.Client(transport=httpx.MockTransport(flaky)), sleep=lambda s: None)
+    assert res["downloaded"] == len(files) and res["failed"] == 0
+    assert any("reduced to" in m for m in msgs)
+
+
+def test_quick_uptodate_check(tmp_path):
+    from dtrpg_manager.sync import needs_download
+    f = tmp_path / "a.pdf"
+    f.write_bytes(b"12345")
+    # DTRPG's own size/checksum are ignored by the quick check (they describe older copies)
+    assert needs_download(f, {"size": 999, "checksum": "nope"}, None, use_checksum=False) is None
+    # a file this app downloaded must keep its recorded size
+    mine = {"local_path": str(f), "local_size": 5, "local_md5": hashlib.md5(b"12345").hexdigest()}
+    assert needs_download(f, mine, None, use_checksum=False) is None
+    assert needs_download(f, {**mine, "local_size": 6}, None, use_checksum=False) == "size changed"
+    # verify mode compares with the recorded MD5 first
+    assert needs_download(f, {**mine, "checksum": "stale"}, None, use_checksum=True) is None
+    assert needs_download(f, {"checksum": "nope"}, None, use_checksum=True) == "checksum mismatch"
+    assert needs_download(tmp_path / "missing.pdf", {}, None, use_checksum=False) == "missing"
+    assert needs_download(f, {}, "2999-01-01T00:00:00+00:00", use_checksum=False) == "outdated"

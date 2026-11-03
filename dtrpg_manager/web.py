@@ -214,12 +214,14 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
         body = request.get_json()
         allowed = {"api_key", "library_path", "omit_publisher", "validate_checksums",
                    "include_archived", "threads", "page_size", "fetch_filters", "request_timeout", "download_delay",
-                   "anthropic_api_key"}
+                   "anthropic_api_key", "verify_existing"}
         for k, v in body.items():
             if k not in allowed:
                 raise ValueError(f"Unknown setting {k}")
             if k in ("api_key", "anthropic_api_key") and (not v or v.startswith("••••")):
                 continue
+            if k == "threads" and not 1 <= int(v) <= 8:
+                raise ValueError("threads must be between 1 and 8")
             setattr(app.config["cfg"], k, type(getattr(cfg, k))(v))
         cfg.save()
         return jsonify(cfg.public())

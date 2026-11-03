@@ -291,10 +291,14 @@ class DtrpgApi:
         params = {"siteId": DRIVETHRU_SITE_ID, "index": index, "getChecksums": 0}
         data = self._json(self._request("GET", f"order_products/{order_product_id}/prepare", params=params))
         deadline = time.monotonic() + self._poll_timeout
+        polls = 0
         while str(data.get("status", "")).lower().startswith("preparing"):
             if time.monotonic() > deadline:
                 raise ApiError(f"Timed out waiting for {order_product_id}/{index} to be prepared")
-            time.sleep(self._poll_interval)
+            # watermarking usually finishes in ~1-2 s (measured 2026-11-03), so check
+            # early and back off: 0.5 s, 1 s, then the configured interval
+            time.sleep(min(self._poll_interval, (0.5, 1.0)[polls] if polls < 2 else self._poll_interval))
+            polls += 1
             data = self._json(self._request("GET", f"order_products/{order_product_id}/check", params=params))
         if not isinstance(data, dict) or not data.get("url"):
             raise ApiError(f"No download URL for {order_product_id}/{index}: {str(data)[:300]}")

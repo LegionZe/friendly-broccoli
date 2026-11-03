@@ -294,15 +294,15 @@ async function loadSettings() {
   const c = await api("/api/config");
   const f = $("#settings-form");
   f.api_key.value = ""; f.api_key.placeholder = c.api_key_set ? `saved (${c.api_key})` : "paste your application key";
-  f.library_path.value = c.library_path; f.threads.value = c.threads; f.download_delay.value = c.download_delay;
+  f.library_path.value = c.library_path; f.threads.value = c.threads; f.download_delay.value = c.download_delay; f.verify_existing.checked = c.verify_existing;
   f.omit_publisher.checked = c.omit_publisher; f.validate_checksums.checked = c.validate_checksums; f.include_archived.checked = c.include_archived;
   f.anthropic_api_key.value = ""; f.anthropic_api_key.placeholder = c.anthropic_api_key_set ? `saved ${c.anthropic_api_key || "(from environment)"}` : "optional — only for AI tag suggestions";
   f.fetch_filters.checked = c.fetch_filters; f.request_timeout.value = c.request_timeout;
 }
 $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const f = e.target, body = { library_path: f.library_path.value, threads: +f.threads.value || 1,
-    download_delay: f.download_delay.value === "" ? 2 : +f.download_delay.value,
+  const f = e.target, body = { library_path: f.library_path.value, threads: Math.min(8, Math.max(1, +f.threads.value || 4)),
+    download_delay: f.download_delay.value === "" ? 0 : +f.download_delay.value, verify_existing: f.verify_existing.checked,
     omit_publisher: f.omit_publisher.checked, validate_checksums: f.validate_checksums.checked, include_archived: f.include_archived.checked,
     fetch_filters: f.fetch_filters.checked, request_timeout: +f.request_timeout.value || 120 };
   if (f.api_key.value) body.api_key = f.api_key.value.trim();

@@ -25,10 +25,14 @@ class Config:
     library_path: str = field(default_factory=lambda: str(Path.home() / "DriveThruRPG"))
     db_path: str = ""
     omit_publisher: bool = False
-    validate_checksums: bool = True
+    # Reject downloads whose MD5 differs from DriveThruRPG's newest recorded checksum.
+    # Off by default: those checksums describe earlier watermarked copies and often
+    # don't match a fresh download (observed 2026-11-03: 2 of 8 files).
+    validate_checksums: bool = False
     include_archived: bool = False
-    threads: int = 1  # parallel downloads; >1 makes HTTP 503s from DTRPG more likely
-    download_delay: float = 2.0  # seconds between downloads
+    threads: int = 4  # max parallel downloads (1-8); reduced automatically when the server pushes back
+    download_delay: float = 0.0  # optional pause after each download, per worker
+    verify_existing: bool = False  # hash every existing file when checking what's up to date (slow)
     page_size: int = 50
     fetch_filters: bool = True  # getFilters=1: DTRPG categories; slower server-side
     request_timeout: int = 120  # seconds to wait for an API response

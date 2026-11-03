@@ -152,10 +152,11 @@
         <label>Anthropic API key <small>(for AI tag suggestions; <a href="https://platform.claude.com" target="_blank" rel="noopener">platform.claude.com</a>)</small>
           <input name="anthropic_api_key" type="password" autocomplete="off"></label>
         <label>Download folder <input name="library_path"></label>
-        <label>Parallel downloads <small>(1 recommended — DriveThruRPG returns HTTP 503 when hit with several at once)</small> <input name="threads" type="number" min="1" max="4"></label>
-        <label>Seconds between downloads <input name="download_delay" type="number" min="0" max="60" step="0.5"></label>
+        <label>Parallel downloads, 1–8 <small>(the app halves this automatically if DriveThruRPG answers “busy”, then builds back up)</small> <input name="threads" type="number" min="1" max="8"></label>
+        <label>Pause after each download, seconds <small>(0 = none)</small> <input name="download_delay" type="number" min="0" max="60" step="0.5"></label>
+        <label class="check"><input name="verify_existing" type="checkbox"> Verify already-downloaded files by checksum (slow; normally size and date are checked)</label>
         <label class="check"><input name="omit_publisher" type="checkbox"> Don't create publisher folders</label>
-        <label class="check"><input name="validate_checksums" type="checkbox"> Validate MD5 checksums</label>
+        <label class="check"><input name="validate_checksums" type="checkbox"> Strict: reject downloads whose checksum differs from DriveThruRPG's record <small>(their records describe earlier copies, so this rejects some valid files)</small></label>
         <label class="check"><input name="include_archived" type="checkbox"> Sync archived products too</label>
         <label class="check"><input name="fetch_filters" type="checkbox"> Fetch DriveThruRPG categories during sync (slower; turned off automatically if pages time out)</label>
         <label>API timeout (seconds) <input name="request_timeout" type="number" min="30" max="600"></label>

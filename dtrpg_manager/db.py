@@ -176,6 +176,10 @@ class Library:
         for col in ("thumb_url", "description", "slug"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
+        f_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(files)")}
+        for col, typ in (("local_size", "INTEGER"), ("local_md5", "TEXT")):
+            if col not in f_cols:
+                self.conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typ}")
         pt_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(product_tags)")}
         if "source" not in pt_cols:
             self.conn.execute("ALTER TABLE product_tags ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
@@ -282,11 +286,21 @@ class Library:
             )
         ]
 
-    def mark_downloaded(self, opid: str, idx: int, local_path: str) -> None:
-        self._x(
-            "UPDATE files SET local_path=?, downloaded_at=? WHERE order_product_id=? AND idx=?",
-            (local_path, now(), opid, idx),
-        )
+    def mark_downloaded(
+        self, opid: str, idx: int, local_path: str, size: int | None = None, md5: str | None = None
+    ) -> None:
+        """Record where a file is; ``size``/``md5`` describe the bytes this app received."""
+        if size is None:
+            self._x(
+                "UPDATE files SET local_path=?, downloaded_at=COALESCE(downloaded_at, ?) WHERE order_product_id=? AND idx=?",
+                (local_path, now(), opid, idx),
+            )
+        else:
+            self._x(
+                """UPDATE files SET local_path=?, downloaded_at=?, local_size=?, local_md5=?
+                   WHERE order_product_id=? AND idx=?""",
+                (local_path, now(), size, md5, opid, idx),
+            )
 
     # -- metadata ---------------------------------------------------------
     def update_meta(self, opid: str, changes: dict[str, Any]) -> None:

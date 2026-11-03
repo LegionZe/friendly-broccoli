@@ -69,7 +69,16 @@ def md5_file(path: Path) -> str:
 
 
 def needs_download(path: Path, file_row: dict[str, Any], file_last_modified: str | None, use_checksum: bool) -> str | None:
-    """Return a reason string if the file should be (re)downloaded, else None."""
+    """Return a reason string if the file should be (re)downloaded, else None.
+
+    Like glujan/drpg's ``_need_download``: a file is current if it exists and
+    DriveThruRPG's ``fileLastModified`` is not newer than the local file. If this
+    app downloaded the file, its recorded size must also still match (cheap
+    corruption check). ``use_checksum`` additionally hashes the file and compares
+    it with the recorded MD5 (or, for files from elsewhere, DTRPG's checksum).
+    DTRPG's own size/checksum are not used for the quick check: they describe
+    earlier watermarked copies and often differ from a fresh download.
+    """
     if not path.exists():
         return "missing"
     if file_last_modified:
@@ -79,8 +88,14 @@ def needs_download(path: Path, file_row: dict[str, Any], file_last_modified: str
                 return "outdated"
         except ValueError:
             pass
-    if use_checksum and file_row.get("checksum") and md5_file(path) != file_row["checksum"]:
-        return "checksum mismatch"
+    recorded_here = file_row.get("local_path") == str(path)
+    if recorded_here and file_row.get("local_size") and path.stat().st_size != file_row["local_size"]:
+        return "size changed"
+    if use_checksum:
+        expected = file_row.get("local_md5") if recorded_here else None
+        expected = expected or file_row.get("checksum")
+        if expected and md5_file(path) != expected:
+            return "checksum mismatch"
     return None
 
 
@@ -123,7 +138,7 @@ def download_file(
     opid = file_row["order_product_id"]
     path = target_path(cfg, file_row["product_name"], file_row.get("publisher"), file_row["filename"])
     if not force:
-        reason = needs_download(path, file_row, file_row.get("file_last_modified"), cfg.validate_checksums)
+        reason = needs_download(path, file_row, file_row.get("file_last_modified"), cfg.verify_existing)
         if reason is None:
             lib.mark_downloaded(opid, file_row["idx"], str(path))
             return "up to date"
@@ -133,6 +148,8 @@ def download_file(
     own_client = http is None
     http = http or httpx.Client(timeout=120.0, follow_redirects=True, headers={"User-Agent": USER_AGENT})
     h = hashlib.md5()
+    size = 0
+    head = b""
     try:
         with http.stream("GET", info["url"], follow_redirects=True) as resp:
             if not resp.is_success:
@@ -141,15 +158,24 @@ def download_file(
                 for chunk in resp.iter_bytes(1 << 16):
                     fh.write(chunk)
                     h.update(chunk)
+                    size += len(chunk)
+                    if len(head) < 8:
+                        head += chunk[:8]
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
     finally:
         if own_client:
             http.close()
-    if cfg.validate_checksums and file_row.get("checksum") and h.hexdigest() != file_row["checksum"]:
+    digest = h.hexdigest()
+    if path.suffix.lower() == ".pdf" and not head.startswith(b"%PDF"):
         tmp.unlink(missing_ok=True)
-        raise ApiError(f"Checksum mismatch for {file_row['filename']} ({h.hexdigest()} != {file_row['checksum']})")
+        raise ApiError(f"{file_row['filename']} is not a PDF (got {head[:8]!r}); not saved")
+    if file_row.get("checksum") and digest != file_row["checksum"]:
+        if cfg.validate_checksums:
+            tmp.unlink(missing_ok=True)
+            raise ApiError(f"Checksum mismatch for {file_row['filename']} ({digest} != {file_row['checksum']})")
+        logger.info("%s: MD5 differs from DriveThruRPG's record (normal for re-watermarked files)", file_row["filename"])
     tmp.replace(path)
     if flm := file_row.get("file_last_modified"):
         try:
@@ -157,7 +183,7 @@ def download_file(
             os.utime(path, (ts, ts))
         except ValueError:
             pass
-    lib.mark_downloaded(opid, file_row["idx"], str(path))
+    lib.mark_downloaded(opid, file_row["idx"], str(path), size=size, md5=digest)
     return "downloaded"
 
 
@@ -221,6 +247,48 @@ class JobManager:
 RETRYABLE = {429, 500, 502, 503, 504}
 
 
+class AdaptiveLimit:
+    """Concurrency cap that halves when the server pushes back (429/5xx) and
+    grows by one after every ``grow_after`` consecutive successes, up to ``maximum``."""
+
+    def __init__(self, maximum: int, grow_after: int = 10) -> None:
+        self.maximum = self.limit = max(1, maximum)
+        self.grow_after = grow_after
+        self.active = self.streak = 0
+        self.cv = threading.Condition()
+
+    def acquire(self, cancel: threading.Event) -> None:
+        with self.cv:
+            while self.active >= self.limit:
+                if cancel.is_set():
+                    raise JobCancelled
+                self.cv.wait(0.5)
+            self.active += 1
+
+    def release(self) -> None:
+        with self.cv:
+            self.active -= 1
+            self.cv.notify_all()
+
+    def success(self) -> int | None:
+        with self.cv:
+            self.streak += 1
+            if self.limit < self.maximum and self.streak >= self.grow_after:
+                self.limit += 1
+                self.streak = 0
+                self.cv.notify_all()
+                return self.limit
+        return None
+
+    def pushback(self) -> int | None:
+        with self.cv:
+            self.streak = 0
+            if self.limit > 1:
+                self.limit = max(1, self.limit // 2)
+                return self.limit
+        return None
+
+
 def download_many(
     cfg: Config,
     lib: Library,
@@ -236,14 +304,14 @@ def download_many(
     breaker_threshold: int = 5,
     breaker_pause: float = 300.0,
 ) -> dict[str, int]:
-    """Download files politely.
+    """Download files in parallel without hammering the server.
 
-    The file server (watermark.drivethrurpg.com) sits behind Cloudflare and
-    answers with 503 when overloaded or rate-limiting (glujan/drpg issues
-    #143 and #155). So: one file at a time by default, a delay between files,
-    Retry-After / exponential back-off with a freshly prepared link on each
-    retry, and a circuit breaker that pauses once and then stops the job if
-    every file keeps failing, instead of hammering hundreds of URLs.
+    Up to ``cfg.threads`` downloads run at once; the cap halves whenever the
+    file server answers 429/5xx and creeps back up after a run of successes
+    (AdaptiveLimit). Retries honour Retry-After (else back off 15 s, 30 s) with
+    a freshly prepared link each time, and a circuit breaker pauses once and
+    then stops the job if every file keeps failing. Background: drpg users
+    report 503s from DriveThruRPG (glujan/drpg issues #143, #155).
     """
     cancel = cancel or threading.Event()
 
@@ -263,38 +331,53 @@ def download_many(
     )
     pending = [f for f in files if force or needs_download(
         target_path(cfg, f["product_name"], f.get("publisher"), f["filename"]), f,
-        f.get("file_last_modified"), cfg.validate_checksums) is not None]
+        f.get("file_last_modified"), cfg.verify_existing) is not None]
     counts["up to date"] = len(files) - len(pending)
     log(f"{len(pending)} file(s) to download, {counts['up to date']} already up to date")
     try:
         api.authenticate()
+
+        limiter = AdaptiveLimit(max(1, int(cfg.threads)))
 
         def one(f: dict[str, Any]) -> None:
             label = f"{f['product_name']} / {f['filename']}"
             for attempt in range(1, max_attempts + 1):
                 if cancel.is_set() or state["abort"]:
                     return
+                limiter.acquire(cancel)
                 try:
                     res = download_file(api, lib, cfg, f, http=http, force=True)
                 except DownloadHTTPError as e:
                     if not state["detail_logged"]:
                         state["detail_logged"] = True
                         log(f"Download server response: {e.detail}")
+                    if e.status in RETRYABLE and (new := limiter.pushback()) is not None:
+                        log(f"Server pushed back (HTTP {e.status}); parallel downloads reduced to {new}")
                     if e.status in RETRYABLE and attempt < max_attempts:
+                        limiter.release()
                         delay = e.retry_after if e.retry_after is not None else min(300.0, 15.0 * 2 ** (attempt - 1))
                         log(f"HTTP {e.status} for {label}; retry {attempt}/{max_attempts - 1} in {delay:.0f}s")
                         wait(delay)
                         continue
+                    limiter.release()
                     err: Exception = e
                     server_side = e.status in RETRYABLE
                 except (ApiError, httpx.HTTPError, OSError, ValueError) as e:
+                    limiter.release()
                     err, server_side = e, isinstance(e, (httpx.TransportError,))
+                except BaseException:
+                    limiter.release()
+                    raise
                 else:
+                    limiter.release()
                     with lock:
                         counts[res] += 1
                         state["consecutive"] = 0
                     log(f"Downloaded {label}")
-                    wait(cfg.download_delay)
+                    if (new := limiter.success()) is not None:
+                        log(f"Parallel downloads back up to {new}")
+                    if cfg.download_delay:
+                        wait(cfg.download_delay)
                     return
                 break
             with lock:
