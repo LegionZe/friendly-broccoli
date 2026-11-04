@@ -114,7 +114,7 @@ function libraryParams() {
   const set = (k, v) => v && p.set(k, v);
   set("q", $("#f-q").value); set("sort", $("#f-sort").value); set("status", $("#f-status").value);
   set("product_type", $("#f-type").value); set("publisher", $("#f-publisher").value);
-  set("min_rating", $("#f-rating").value); set("players", $("#f-players").value); set("downloaded", $("#f-downloaded").value);
+  set("min_rating", $("#f-rating").value); set("players", $("#f-players").value); set("downloaded", $("#f-downloaded").value); set("source", $("#f-source").value);
   if ($("#f-fav").checked) p.set("favourite", "1");
   if ($("#f-untagged").checked) p.set("untagged", "1");
   if ($("#f-archived").checked) p.set("include_archived", "1");
@@ -126,13 +126,13 @@ function card(p, selectable = true) {
   const img = p.thumb_url || p.cover_url;
   const cover = img ? `style="background-image:url('${esc(img)}')"` : "";
   const dl = p.file_count ? `<span class="badge" title="files downloaded">${p.downloaded_count ?? 0}/${p.file_count}</span>` : "";
-  const fav = p.favourite ? `<span class="badge">★</span>` : "";
+  const fav = (p.source === "local" ? `<span class="badge" title="local file">LOCAL</span>` : "") + (p.favourite ? `<span class="badge">★</span>` : "");
   const rating = p.rating ? `<span class="badge">${"★".repeat(p.rating)}</span>` : "";
   return `<div class="card" data-id="${esc(p.order_product_id)}">
     ${selectable ? `<input type="checkbox" class="sel" ${state.selected.has(p.order_product_id) ? "checked" : ""}>` : ""}
     <div class="badges">${fav}${rating}${dl}</div>
     <div class="cover" ${cover}>${img ? "" : "📘"}</div>
-    <div class="body"><div class="title">${esc(p.name)}</div><div class="pub">${esc(p.publisher || "")} · ${esc(p.status)}</div>
+    <div class="body"><div class="title">${esc(p.name)}</div><div class="pub">${[p.publisher, p.status].filter(Boolean).map(esc).join(" · ")}</div>
     <div class="chips">${(p.tags || []).map((t) => chip(t)).join("")}</div></div></div>`;
 }
 function bindCards(root) {
@@ -158,7 +158,7 @@ async function loadLibrary() {
 const reload = () => { state.offset = 0; loadLibrary().catch(fail); };
 let qTimer;
 $("#f-q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(reload, 250); });
-["#f-sort", "#f-status", "#f-type", "#f-publisher", "#f-rating", "#f-players", "#f-downloaded", "#f-fav", "#f-untagged", "#f-archived"].forEach((id) => $(id).addEventListener("change", reload));
+["#f-sort", "#f-status", "#f-type", "#f-publisher", "#f-rating", "#f-players", "#f-downloaded", "#f-source", "#f-fav", "#f-untagged", "#f-archived"].forEach((id) => $(id).addEventListener("change", reload));
 function clearFilterInputs() {
   $$("#filters input, #filters select").forEach((i) => (i.type === "checkbox" ? (i.checked = false) : (i.value = i.id === "f-sort" ? "name" : "")));
   state.tagSel.clear(); state.filterSel.clear();
@@ -204,7 +204,12 @@ async function openProduct(id) {
   const dtrpgLink = p.product_id ? `<a href="https://www.drivethrurpg.com/en/product/${encodeURIComponent(p.product_id)}${p.slug ? "/" + encodeURIComponent(p.slug) : ""}" target="_blank" rel="noopener">View on DriveThruRPG ↗</a>` : "";
   $("#drawer-body").innerHTML = `
     <div class="detail-head">${p.cover_url ? `<img src="${esc(p.cover_url)}" alt="">` : ""}
-      <div><h2>${esc(p.name)}</h2><div class="hint">${esc(p.publisher || "")}</div>
+      <div><h2>${esc(p.name)}</h2><div class="hint">${esc(p.publisher || "")}${p.source === "local" ? ' <span class="badge">LOCAL</span>' : ""}</div>
+      ${p.source === "local" ? `<details class="local-edit"><summary>Edit details</summary>
+        <label>Name <input id="d-i-name" value="${esc(p.name)}"></label>
+        <label>Publisher <input id="d-i-pub" value="${esc(p.publisher || "")}"></label>
+        <label>Description <textarea id="d-i-desc" rows="3">${esc(p.description || "")}</textarea></label>
+        <button id="d-i-save">Save details</button></details>` : ""}
       <div class="hint">Purchased: ${esc(p.date_purchased || "unknown")} · Files updated: ${esc(p.file_last_modified || "unknown")}${p.archived ? " · archived" : ""}</div>
       <div>${dtrpgLink}</div>
       ${p.description ? `<p class="desc">${esc(p.description)}</p>` : ""}
@@ -227,8 +232,8 @@ async function openProduct(id) {
     <h3>Files</h3>
     <table class="files">${p.files.map((f) => `<tr><td>${esc(f.filename)}</td><td>${f.size ? (f.size / 1048576).toFixed(1) + " MB" : ""}</td>
       <td>${f.local_path ? `<a href="/files/${encodeURIComponent(p.order_product_id)}/${f.idx}" target="_blank">Open</a>` : ""}</td>
-      <td><button class="secondary" data-dl="${f.idx}">${f.local_path ? "Re-download" : "Download"}</button></td></tr>`).join("") || "<tr><td>No files listed</td></tr>"}</table>
-    <div class="row" style="margin-top:8px"><button id="d-dlall">Download all files</button></div>
+      <td>${p.source === "local" ? `<span class="hint">${esc(f.local_path || "")}</span>` : `<button class="secondary" data-dl="${f.idx}">${f.local_path ? "Re-download" : "Download"}</button>`}</td></tr>`).join("") || "<tr><td>No files listed</td></tr>"}</table>
+    ${p.source === "local" ? "" : `<div class="row" style="margin-top:8px"><button id="d-dlall">Download all files</button></div>`}
     <h3>Related <button id="d-like" class="secondary" title="Random pick among similar products">🎲 Something like this</button></h3>
     <div id="d-related" class="hint">Loading…</div>
     <div class="link-add"><select id="d-linkkind">${(m.link_kinds || []).map((k) => `<option>${esc(k)}</option>`).join("")}</select>
@@ -278,7 +283,11 @@ async function openProduct(id) {
   $("#d-addtag").addEventListener("click", addTag);
   $("#d-tagname").addEventListener("keydown", (e) => e.key === "Enter" && addTag());
   $$("[data-dl]").forEach((b) => b.addEventListener("click", () => startDownload({ ids: [id], idx: [+b.dataset.dl], force: true })));
-  $("#d-dlall").addEventListener("click", () => startDownload({ ids: [id] }));
+  $("#d-dlall")?.addEventListener("click", () => startDownload({ ids: [id] }));
+  $("#d-i-save")?.addEventListener("click", async () => {
+    const body = { name: $("#d-i-name").value, publisher: $("#d-i-pub").value, description: $("#d-i-desc").value };
+    if (await api(`/api/products/${encodeURIComponent(id)}/info`, { method: "PATCH", body }).catch(fail)) { toast("Saved"); openProduct(id); loadMeta(); }
+  });
   $("#drawer").classList.remove("hidden");
 }
 const closeDrawer = () => { $("#drawer").classList.add("hidden"); loadLibrary().catch(fail); };
@@ -367,6 +376,7 @@ async function loadHolds() {
 $("#hold-hours").addEventListener("change", (e) => api("/api/config", { method: "PATCH", body: { hold_failed_hours: Math.max(0, +e.target.value || 0) } }).then(() => { toast("Saved"); loadHolds(); }).catch(fail));
 async function loadSettings() {
   loadHolds();
+  api("/api/config").then((c) => { $("#local-folders").value = (c.local_folders || []).join("\n"); }).catch(() => {});
   const c = await api("/api/config");
   const f = $("#settings-form");
   f.api_key.value = ""; f.api_key.placeholder = c.api_key_set ? `saved (${c.api_key})` : "paste your application key";
@@ -386,6 +396,10 @@ $("#settings-form").addEventListener("submit", async (e) => {
   await api("/api/config", { method: "PATCH", body }).then(() => toast("Settings saved")).catch(fail);
   loadSettings();
 });
+const saveFolders = () => api("/api/config", { method: "PATCH", body: { local_folders: $("#local-folders").value.split("\n").map((x) => x.trim()).filter(Boolean) } });
+$("#local-save").addEventListener("click", () => saveFolders().then(() => toast("Folders saved")).catch(fail));
+$("#local-scan").addEventListener("click", () => saveFolders().then(() => api("/api/local/scan", { method: "POST", body: {} }))
+  .then(() => { toast("Scanning — progress under Jobs"); pollJobs(); }).catch(fail));
 $("#do-sync").addEventListener("click", () => api("/api/sync", { method: "POST", body: {} }).then(() => { toast("Sync started"); pollJobs(); }).catch(fail));
 $("#do-download-all").addEventListener("click", () => startDownload({ all: true }));
 function startDownload(body) { api("/api/download", { method: "POST", body }).then(() => { toast("Download started — see Settings & sync › Jobs"); pollJobs(); }).catch(fail); }

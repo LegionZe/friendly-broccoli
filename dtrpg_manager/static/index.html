@@ -36,6 +36,7 @@
       <label>Publisher <select id="f-publisher"><option value="">Any</option></select></label>
       <label>Min rating <select id="f-rating"><option value="">Any</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
       <label>Players <input id="f-players" type="number" min="1" max="20" placeholder="any"></label>
+      <label>Source <select id="f-source"><option value="">All</option><option value="dtrpg">DriveThruRPG</option><option value="local">Local books</option></select></label>
       <label>Downloaded <select id="f-downloaded"><option value="">Any</option><option value="yes">Yes</option><option value="no">No</option></select></label>
       <label class="check"><input id="f-fav" type="checkbox"> Favourites only</label>
       <label class="check"><input id="f-untagged" type="checkbox"> Untagged only</label>
@@ -184,6 +185,10 @@
         <a class="button secondary" href="/api/export.csv">Export CSV</a>
         <label class="button secondary">Import JSON <input id="import-file" type="file" accept=".json" hidden></label>
       </div>
+      <h2>Local books</h2>
+      <p class="hint">Folders with game books bought elsewhere or scanned (PDF, EPUB, CBZ/CBR, MOBI/AZW3, DjVu). Subfolders are included; files are only read, never moved or changed. One folder per line, e.g. <code>/home/you/RPG PDFs</code>.</p>
+      <textarea id="local-folders" rows="3" spellcheck="false"></textarea>
+      <div class="row"><button id="local-save" class="secondary">Save folders</button><button id="local-scan">Scan local folders</button></div>
       <h2>Downloads on hold</h2>
       <p class="hint">Files whose download failed a check (checksum in strict mode, or not a PDF) are skipped by “Download all” for
         <input id="hold-hours" type="number" min="0" max="720" step="1" style="width:70px"> hours (0 = never hold). Downloading a single file from its product panel ignores the hold.</p>

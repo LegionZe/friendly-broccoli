@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from . import enrich, llm
 from .api import DtrpgApi
 from .related import RelatedIndex, related
 from .config import Config
+from . import local as local_books
 from .db import LINK_KINDS, PRODUCT_TYPES, STATUSES, TAG_KINDS, Library
 from .suggest import suggest
 from .sync import JobManager, download_many, sync_library
@@ -36,6 +38,7 @@ def _filters_from_args(args: Any) -> dict[str, Any]:
         "any_tag_ids": args.getlist("any_tag"),
         "any_filter_ids": args.getlist("any_filter"),
         "untagged": args.get("untagged") in ("1", "true"),
+        "source": args.get("source"),
         "include_archived": args.get("include_archived") in ("1", "true"),
         "sort": args.get("sort"),
     }
@@ -217,10 +220,32 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
         if not row or not row["local_path"]:
             abort(404)
         path = Path(row["local_path"]).resolve()
-        root = Path(cfg.library_path).expanduser().resolve()
-        if root not in path.parents or not path.exists():
-            abort(404)
+        roots = [Path(r).expanduser().resolve() for r in [cfg.library_path, *cfg.local_folders] if r]
+        if not any(r in path.parents for r in roots) or not path.exists():
+            abort(404)  # only serve files inside the download folder or a configured local folder
         return send_file(path)
+
+    cover_dir = cfg_dir / "covers"
+
+    @app.get("/covers/<name>")
+    def cover(name: str):
+        if not re.fullmatch(r"local-[0-9a-f]{16}\.jpg", name):
+            abort(404)
+        return send_from_directory(cover_dir, name)
+
+    @app.post("/api/local/scan")
+    def api_local_scan():
+        if jobs.running("local scan"):
+            return jsonify(error="A scan is already running"), 409
+        if not cfg.local_folders:
+            raise ValueError("Add at least one local folder in Settings first")
+        return jsonify(job=jobs.start("local scan", lambda log, cancel: local_books.scan(
+            lib, cfg.local_folders, exclude=[cfg.library_path], cover_dir=cover_dir, log=log, cancel=cancel)))
+
+    @app.patch("/api/products/<opid>/info")
+    def update_info(opid: str):
+        lib.update_info(opid, request.get_json())
+        return jsonify(lib.product(opid))
 
     # -- settings ---------------------------------------------------------
     @app.get("/api/config")
@@ -232,12 +257,16 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
         body = request.get_json()
         allowed = {"api_key", "library_path", "omit_publisher", "validate_checksums",
                    "include_archived", "threads", "page_size", "fetch_filters", "request_timeout", "download_delay",
-                   "anthropic_api_key", "verify_existing", "hold_failed_hours"}
+                   "anthropic_api_key", "verify_existing", "hold_failed_hours", "local_folders"}
         for k, v in body.items():
             if k not in allowed:
                 raise ValueError(f"Unknown setting {k}")
             if k in ("api_key", "anthropic_api_key") and (not v or v.startswith("••••")):
                 continue
+            if k == "local_folders":
+                if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                    raise ValueError("local_folders must be a list of folder paths")
+                v = [x.strip() for x in v if x.strip()]
             if k == "threads" and not 1 <= int(v) <= 8:
                 raise ValueError("threads must be between 1 and 8")
             setattr(app.config["cfg"], k, type(getattr(cfg, k))(v))

@@ -65,6 +65,21 @@ dtrpg-manager reparse                  # re-normalise stored raw JSON
 
 Configuration lives in `~/.config/dtrpg-manager/config.json` (`%APPDATA%\dtrpg-manager` on Windows, `~/Library/Application Support/dtrpg-manager` on macOS). The file is written with mode 600. The environment variables `DTRPG_API_KEY` (or `DRPG_TOKEN`, for compatibility with drpg), `DTRPG_LIBRARY_PATH`, and `DTRPG_MANAGER_HOME` override it.
 
+## Local books
+
+Books bought elsewhere or scanned can sit in the same library. List their folders under **Settings › Local books** and press **Scan local folders**, or from the command line:
+
+```bash
+dtrpg-manager scan "/home/you/RPG PDFs" --save
+```
+
+- **What's scanned:** subfolders are included, and PDF, EPUB, CBZ/CBR, MOBI/AZW3 and DjVu files are picked up. Files are only read; they are never copied, moved or changed. The DriveThruRPG download folder is skipped.
+- **One file = one product.** The name comes from the PDF title when sensible, otherwise from the file name. The folder path is used as the description, which the keyword rules and the AI pass can use. The cover comes from the first image on the first page.
+- **Identity follows the file's content:** renaming or moving a file keeps its tags and notes, and identical copies count once.
+- **Rescans:** a file that has disappeared is flagged as removed. A folder that is configured but unavailable, such as an unplugged drive, is left alone.
+- **Editing:** name, publisher and description can be edited in the product panel. Rescans keep your edits.
+- **Separate from DriveThruRPG:** sync and downloads never touch local books. **Source** in the library sidebar filters by origin.
+
 ## Automatic tagging
 
 The **Auto-tag** page runs four passes. Each tag records where it came from (`manual`, `dtrpg`, `rule`, `llm`) and, for automatic tags, a confidence. Tags you add are never changed by a pass. Anything you remove or reject is remembered and not suggested again.

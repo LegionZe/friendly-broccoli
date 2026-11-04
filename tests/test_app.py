@@ -742,3 +742,96 @@ def test_dtrpg_counts_roll_up_to_parents():
     assert fl["Fantasy"]["count"] == lib.search({"filter_ids": ["100"]})["total"] == 4
     assert fl["Dark Fantasy"]["count"] == 3 and fl["Dark Fantasy"]["direct"] == 3
     assert fl["Fantasy"]["direct"] == 3
+
+
+# ---------------------------------------------------------------- local books
+def _make_pdf(path, title=None, with_image=False):
+    from pypdf import PdfWriter
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if with_image:
+        from PIL import Image
+        Image.new("RGB", (300, 420), (120, 30, 30)).save(path, "PDF")
+        if title:
+            from pypdf import PdfReader
+            w = PdfWriter(clone_from=PdfReader(str(path)))
+            w.add_metadata({"/Title": title})
+            with path.open("wb") as fh:
+                w.write(fh)
+        return path
+    w = PdfWriter()
+    w.add_blank_page(width=200, height=200)
+    if title:
+        w.add_metadata({"/Title": title})
+    with path.open("wb") as fh:
+        w.write(fh)
+    return path
+
+
+def test_local_scan(tmp_path):
+    from dtrpg_manager.local import scan
+
+    books, dl = tmp_path / "books", tmp_path / "dtrpg"
+    _make_pdf(books / "Shadowrun" / "SR5_Core_Rulebook.pdf", title="Shadowrun Fifth Edition Core", with_image=True)
+    _make_pdf(books / "misc" / "Weird_Thing (1).pdf")
+    (books / "novels").mkdir()
+    (books / "novels" / "story.epub").write_bytes(b"PK epub-ish")
+    (books / ".hidden.pdf").write_bytes(b"%PDF hidden")
+    _make_pdf(dl / "Pub" / "Bought.pdf")                       # the DTRPG download folder: excluded
+    lib = Library(":memory:")
+    lib.upsert_product(normalize_product(PRODUCTS[0]), PRODUCTS[0])  # a DTRPG product alongside
+    covers = tmp_path / "covers"
+    st = scan(lib, [str(books), str(dl)], exclude=[str(dl)], cover_dir=covers, log=lambda m: None)
+    assert st["found"] == 3 and st["new"] == 3
+    local = {i["name"]: i for i in lib.search({"source": "local"})["items"]}
+    assert set(local) == {"Shadowrun Fifth Edition Core", "Weird Thing", "story"}
+    sr = local["Shadowrun Fifth Edition Core"]
+    assert sr["thumb_url"].startswith("/covers/local-") and (covers / sr["thumb_url"].split("/")[-1]).exists()
+    assert "Shadowrun" in sr["description"]                      # folder name feeds rules / AI
+    assert lib.search({"source": "dtrpg"})["total"] == 1
+    # unchanged rescan does nothing
+    assert scan(lib, [str(books)], exclude=[str(dl)], log=lambda m: None)["unchanged"] == 3
+    # tags + edits survive a rename/move (content-based id)
+    lib.add_tag(sr["order_product_id"], "system", "Shadowrun 5e")
+    lib.update_info(sr["order_product_id"], {"name": "SR5 Core", "publisher": "Catalyst"})
+    (books / "Shadowrun" / "SR5_Core_Rulebook.pdf").rename(books / "core.pdf")
+    scan(lib, [str(books)], exclude=[str(dl)], log=lambda m: None)
+    p = lib.product(sr["order_product_id"])
+    assert p["name"] == "SR5 Core" and p["publisher"] == "Catalyst" and not p["removed"]
+    assert p["files"][0]["local_path"].endswith("core.pdf") and p["tags"][0]["name"] == "Shadowrun 5e"
+    # an identical copy counts once
+    import shutil
+    shutil.copy(books / "core.pdf", books / "misc" / "copy.pdf")
+    assert scan(lib, [str(books)], exclude=[str(dl)], log=lambda m: None)["new"] == 0
+    # deleted file -> removed; unavailable folder -> kept
+    (books / "misc" / "Weird_Thing (1).pdf").unlink()
+    assert scan(lib, [str(books)], exclude=[str(dl)], log=lambda m: None)["removed"] == 1
+    st = scan(lib, [str(books), str(tmp_path / "unplugged")], exclude=[str(dl)], log=lambda m: None)
+    assert st["removed"] == 0
+    # DTRPG sync's removal pass and downloads leave local books alone
+    assert lib.mark_removed_except({PRODUCTS[0]["orderProductId"].__str__()}, False) == 0
+    assert all(f["order_product_id"].startswith("local-") is False for f in lib.all_files())
+    with pytest.raises(ValueError):
+        lib.update_info("1", {"name": "x"})                       # DTRPG products aren't editable
+
+
+def test_local_web(cfg, tmp_path):
+    from dtrpg_manager.web import create_app
+
+    cfg._path = tmp_path / "config.json"
+    books = tmp_path / "books"
+    _make_pdf(books / "A Book.pdf", with_image=True)
+    lib = Library(":memory:")
+    c = create_app(cfg, lib).test_client()
+    assert c.post("/api/local/scan", json={}).status_code == 400          # no folders yet
+    assert c.patch("/api/config", json={"local_folders": "not a list"}).status_code == 400
+    assert c.patch("/api/config", json={"local_folders": [str(books), "  "]}).get_json()["local_folders"] == [str(books)]
+    from dtrpg_manager.local import scan
+    scan(lib, cfg.local_folders, cover_dir=tmp_path / "covers", log=lambda m: None)
+    item = c.get("/api/products?source=local").get_json()["items"][0]
+    assert c.get(f"/files/{item['order_product_id']}/0").status_code == 200   # inside a local folder
+    assert c.get(item["thumb_url"]).status_code == 200
+    assert c.get("/covers/..%2Fconfig.json").status_code == 404
+    r = c.patch(f"/api/products/{item['order_product_id']}/info", json={"publisher": "Me"})
+    assert r.get_json()["publisher"] == "Me"
+    cfg.local_folders = []                                                    # folder removed from settings
+    assert c.get(f"/files/{item['order_product_id']}/0").status_code == 404

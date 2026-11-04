@@ -136,6 +136,21 @@ def cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scan(args: argparse.Namespace) -> int:
+    from .local import scan
+
+    cfg = _cfg(args)
+    folders = args.folders or cfg.local_folders
+    if not folders:
+        print("No folders given and none configured (Settings › Local books).")
+        return 2
+    if args.folders and args.save:
+        cfg.local_folders = sorted(set(cfg.local_folders) | set(args.folders))
+        cfg.save()
+    scan(Library(cfg.db_path), folders, exclude=[cfg.library_path], cover_dir=Path(cfg._path).parent / "covers")
+    return 0
+
+
 def cmd_enrich(args: argparse.Namespace) -> int:
     from . import enrich, llm
 
@@ -243,6 +258,11 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("import", help="import user metadata JSON")
     s.add_argument("file")
     s.set_defaults(fn=cmd_import)
+
+    s = sub.add_parser("scan", help="index local book files (bought elsewhere / scanned)")
+    s.add_argument("folders", nargs="*", help="folders to scan (default: the configured local folders)")
+    s.add_argument("--save", action="store_true", help="add the given folders to the configuration")
+    s.set_defaults(fn=cmd_scan)
 
     s = sub.add_parser("enrich", help="automatic tagging passes")
     s.add_argument("step", choices=["dtrpg", "rules", "pdf", "llm-estimate", "llm-submit", "llm-collect", "llm-batches"])

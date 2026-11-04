@@ -176,6 +176,8 @@ class Library:
         for col in ("thumb_url", "description", "slug"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT")
+        if "source" not in cols:  # 'dtrpg' (synced) or 'local' (scanned folders)
+            self.conn.execute("ALTER TABLE products ADD COLUMN source TEXT NOT NULL DEFAULT 'dtrpg'")
         f_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(files)")}
         for col, typ in (("local_size", "INTEGER"), ("local_md5", "TEXT"), ("failed_at", "TEXT"),
                          ("fail_reason", "TEXT")):
@@ -200,8 +202,11 @@ class Library:
             return self.conn.execute(sql, args)
 
     # -- sync -------------------------------------------------------------
-    def upsert_product(self, rec: dict[str, Any], raw: dict[str, Any]) -> bool:
-        """Insert/update one normalised product. Returns True if it was new."""
+    def upsert_product(self, rec: dict[str, Any], raw: dict[str, Any], source: str = "dtrpg") -> bool:
+        """Insert/update one normalised product. Returns True if it was new.
+
+        For local products, name/publisher/description are only set on insert,
+        so a rescan never overwrites the user's edits."""
         ts = now()
         opid = rec["order_product_id"]
         with self._lock, self.conn:
@@ -210,22 +215,25 @@ class Library:
             c.execute(
                 """INSERT INTO products (order_product_id, product_id, name, publisher, date_purchased,
                        file_last_modified, archived, cover_url, thumb_url, description, slug,
-                       raw_json, first_seen, last_synced, removed)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+                       raw_json, first_seen, last_synced, removed, source)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)
                    ON CONFLICT(order_product_id) DO UPDATE SET
-                       product_id=excluded.product_id, name=excluded.name, publisher=excluded.publisher,
+                       product_id=excluded.product_id,
+                       name=CASE WHEN products.source='local' THEN products.name ELSE excluded.name END,
+                       publisher=CASE WHEN products.source='local' THEN products.publisher ELSE excluded.publisher END,
                        date_purchased=COALESCE(excluded.date_purchased, products.date_purchased),
                        file_last_modified=excluded.file_last_modified, archived=excluded.archived,
                        cover_url=COALESCE(excluded.cover_url, products.cover_url),
                        thumb_url=COALESCE(excluded.thumb_url, products.thumb_url),
-                       description=COALESCE(excluded.description, products.description),
+                       description=CASE WHEN products.source='local' THEN products.description
+                                        ELSE COALESCE(excluded.description, products.description) END,
                        slug=COALESCE(excluded.slug, products.slug),
                        raw_json=excluded.raw_json, last_synced=excluded.last_synced, removed=0""",
                 (
                     opid, rec["product_id"], rec["name"], rec["publisher"], rec["date_purchased"],
                     rec["file_last_modified"], rec["archived"], rec["cover_url"],
                     rec.get("thumb_url"), rec.get("description"), rec.get("slug"),
-                    json.dumps(raw, ensure_ascii=False), ts, ts,
+                    json.dumps(raw, ensure_ascii=False), ts, ts, source,
                 ),
             )
             c.execute("INSERT OR IGNORE INTO product_meta (order_product_id) VALUES (?)", (opid,))
@@ -263,7 +271,7 @@ class Library:
 
     def mark_removed_except(self, seen_ids: set[str], archived_included: bool) -> int:
         """Flag products no longer returned by the API (never deletes user metadata)."""
-        rows = self._q("SELECT order_product_id, archived FROM products WHERE removed=0")
+        rows = self._q("SELECT order_product_id, archived FROM products WHERE removed=0 AND source='dtrpg'")
         gone = [
             r["order_product_id"]
             for r in rows
@@ -277,15 +285,33 @@ class Library:
     def files_for(self, opid: str) -> list[dict[str, Any]]:
         return [dict(r) for r in self._q("SELECT * FROM files WHERE order_product_id=? ORDER BY idx", (opid,))]
 
-    def all_files(self) -> list[dict[str, Any]]:
+    def all_files(self, source: str | None = "dtrpg") -> list[dict[str, Any]]:
+        """Files of live products; by default only DriveThruRPG ones (the downloadable kind)."""
+        cond = "AND p.source=?" if source else ""
         return [
             dict(r)
             for r in self._q(
-                """SELECT f.*, p.name AS product_name, p.publisher, p.file_last_modified
-                   FROM files f JOIN products p USING(order_product_id) WHERE p.removed=0
-                   ORDER BY p.name, f.idx"""
+                f"""SELECT f.*, p.name AS product_name, p.publisher, p.file_last_modified
+                   FROM files f JOIN products p USING(order_product_id) WHERE p.removed=0 {cond}
+                   ORDER BY p.name, f.idx""",
+                (source,) if source else (),
             )
         ]
+
+    def update_info(self, opid: str, changes: dict[str, Any]) -> None:
+        """Edit name/publisher/description of a local product (DTRPG data comes from sync)."""
+        allowed = {"name", "publisher", "description"}
+        if set(changes) - allowed:
+            raise ValueError(f"Only {sorted(allowed)} can be edited")
+        row = self._q("SELECT source FROM products WHERE order_product_id=?", (opid,))
+        if not row or row[0]["source"] != "local":
+            raise ValueError("Only local products can be edited; DriveThruRPG data is refreshed by sync")
+        if "name" in changes and not str(changes["name"] or "").strip():
+            raise ValueError("Name can't be empty")
+        if changes:
+            cols = ", ".join(f"{k}=?" for k in changes)
+            self._x(f"UPDATE products SET {cols} WHERE order_product_id=?",
+                    (*[(str(v).strip() or None) if v is not None else None for v in changes.values()], opid))
 
     def mark_downloaded(
         self, opid: str, idx: int, local_path: str, size: int | None = None, md5: str | None = None
@@ -566,6 +592,9 @@ class Library:
         if q := (f.get("q") or "").strip():
             clauses.append("(p.name LIKE ? OR p.publisher LIKE ? OR m.notes LIKE ? OR p.description LIKE ?)")
             args += [f"%{q}%"] * 4
+        if (src := f.get("source")) in ("dtrpg", "local"):
+            clauses.append("p.source=?")
+            args.append(src)
         if pub := f.get("publisher"):
             clauses.append("p.publisher=?")
             args.append(pub)
@@ -647,7 +676,7 @@ class Library:
         total = self._q(f"SELECT COUNT(*) AS n {base}", args)[0]["n"]
         rows = self._q(
             f"""SELECT p.order_product_id, p.product_id, p.name, p.publisher, p.date_purchased,
-                       p.file_last_modified, p.archived, p.cover_url, p.thumb_url, p.description, p.slug, m.*,
+                       p.file_last_modified, p.archived, p.cover_url, p.thumb_url, p.description, p.slug, p.source, m.*,
                        (SELECT COUNT(*) FROM files x WHERE x.order_product_id=p.order_product_id) AS file_count,
                        (SELECT COUNT(*) FROM files x WHERE x.order_product_id=p.order_product_id AND x.local_path IS NOT NULL) AS downloaded_count
                 {base} ORDER BY {order} LIMIT ? OFFSET ?""",

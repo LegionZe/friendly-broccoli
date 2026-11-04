@@ -23,6 +23,7 @@ def default_config_dir() -> Path:
 class Config:
     api_key: str = ""
     library_path: str = field(default_factory=lambda: str(Path.home() / "DriveThruRPG"))
+    local_folders: list = field(default_factory=list)  # folders of books from elsewhere, scanned in place
     db_path: str = ""
     omit_publisher: bool = False
     # Reject downloads whose MD5 differs from DriveThruRPG's newest recorded checksum.
