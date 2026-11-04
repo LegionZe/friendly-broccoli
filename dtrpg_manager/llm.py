@@ -22,6 +22,7 @@ import os
 from typing import Any
 
 from .db import PRODUCT_TYPES, TAG_KINDS, Library, now
+from .names import needs_ai
 
 MODEL = "claude-haiku-5-5"
 # USD per million tokens, Claude Haiku 5.5, prompts up to 100K tokens
@@ -53,8 +54,10 @@ SCHEMA: dict[str, Any] = {
         "product_type": {"anyOf": [{"type": "string", "enum": list(PRODUCT_TYPES)}, {"type": "null"}]},
         "min_players": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
         "max_players": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+        "title": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "publisher": {"anyOf": [{"type": "string"}, {"type": "null"}]},
     },
-    "required": ["tags", "product_type", "min_players", "max_players"],
+    "required": ["tags", "product_type", "min_players", "max_players", "title", "publisher"],
     "additionalProperties": False,
 }
 
@@ -72,6 +75,8 @@ Prefer names from the existing vocabulary below, spelled exactly as listed. Prop
 confidence is a number from 0 to 1: about 0.9 when the text states it directly, 0.6-0.8 when it is strongly implied, lower when it is a guess. Leave out anything below 0.3.
 
 product_type is one of the listed values, or null if unclear. min_players and max_players only when the text states a player count; otherwise null.
+
+title and publisher: only for products marked "Source: local file", whose title was derived from a file name. Give the product's proper published title (correct spacing, capitalisation and punctuation, e.g. "startrekadventures discoverycrewpackseason3" -> "Star Trek Adventures: Discovery Crew Pack Season 3") and its publisher, when the file name, folder or PDF text make them clear. Use null when unsure, when the current title is already right, and always for products that are not local files.
 
 Existing vocabulary:
 """
@@ -93,8 +98,9 @@ def system_prompt(lib: Library) -> str:
 
 def _product_rows(lib: Library) -> list[dict[str, Any]]:
     rows = lib._q(
-        """SELECT p.order_product_id, p.name, p.publisher, p.description, m.product_type,
-                  t.text AS pdf_text, t.pages
+        """SELECT p.order_product_id, p.name, p.publisher, p.description, p.source, m.product_type,
+                  t.text AS pdf_text, t.pages,
+                  (SELECT f.filename FROM files f WHERE f.order_product_id=p.order_product_id ORDER BY f.idx LIMIT 1) AS filename
            FROM products p JOIN product_meta m USING(order_product_id)
            LEFT JOIN product_text t USING(order_product_id) WHERE p.removed=0 AND p.archived=0"""
     )
@@ -121,6 +127,8 @@ def _filter_paths(lib: Library) -> dict[str, list[str]]:
 
 def user_message(p: dict[str, Any], paths: list[str], include_pdf: bool) -> str:
     parts = [f"Title: {p['name']}", f"Publisher: {p.get('publisher') or 'unknown'}"]
+    if p.get("source") == "local":
+        parts.append(f"Source: local file (title derived from the file name: {p.get('filename') or '?'})")
     if paths:
         parts.append("DriveThruRPG categories: " + "; ".join(sorted(set(paths))))
     have = [f"{t['kind']}: {t['name']}" for t in p.get("tags", [])]
@@ -149,7 +157,8 @@ def candidates(lib: Library, scope: str = "thin", include_pdf: bool = True) -> l
     out = []
     for p in _product_rows(lib):
         core = [t for t in p["tags"] if t["kind"] in ("genre", "system", "setting")]
-        if scope == "thin" and len(core) >= 2 and p.get("product_type"):
+        messy_local_name = p.get("source") == "local" and needs_ai(p["name"])
+        if scope == "thin" and len(core) >= 2 and p.get("product_type") and not messy_local_name:
             continue
         msg = user_message(p, paths.get(p["order_product_id"], []), include_pdf)
         h = hashlib.sha1(msg.encode()).hexdigest()
@@ -247,7 +256,12 @@ def _clean(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(lo, int) and 1 <= lo <= 30:
         hi = hi if isinstance(hi, int) and lo <= hi <= 30 else lo
         players = f"{lo}-{hi}"
-    return {"tags": tags, "product_type": pt if pt in PRODUCT_TYPES else None, "players": players}
+    def text(v: Any) -> str | None:
+        v = str(v).strip() if isinstance(v, str) else ""
+        return v if 1 < len(v) <= 200 else None
+
+    return {"tags": tags, "product_type": pt if pt in PRODUCT_TYPES else None, "players": players,
+            "title": text(data.get("title")), "publisher": text(data.get("publisher"))}
 
 
 def collect(lib: Library, client: Any, batch_id: str) -> dict[str, Any]:
@@ -294,6 +308,10 @@ def collect(lib: Library, client: Any, batch_id: str) -> dict[str, Any]:
             stats["suggestions"] += lib.suggest(opid, "product_type", data["product_type"], "llm", 0.6)
         if data["players"] and not lib.is_rejected(opid, "players", data["players"]):
             stats["suggestions"] += lib.suggest(opid, "players", data["players"], "llm", 0.6)
+        for kind in ("title", "publisher"):  # Library.suggest ignores these for non-local products
+            field = "name" if kind == "title" else kind
+            if data[kind] and not lib.is_rejected(opid, field, data[kind]):
+                stats["suggestions"] += lib.suggest(opid, field, data[kind], "llm", 0.7)
         lib._x("INSERT OR REPLACE INTO llm_done VALUES (?,?,?,?)", (opid, h, batch_id, now()))
     cost = (stats["input_tokens"] / 1e6 * PRICE_IN + stats["output_tokens"] / 1e6 * PRICE_OUT) * BATCH_DISCOUNT
     stats["approx_cost_usd"] = round(cost, 4)

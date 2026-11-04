@@ -467,7 +467,7 @@ const qState = { offset: 0, total: 0 };
 const QPAGE = 50;
 function show(id, data) { $(id).textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); }
 async function loadEnrich() {
-  fillSelect($("#q-kind"), [...state.meta.tag_kinds, "product_type", "players"].map((k) => [k, k]));
+  fillSelect($("#q-kind"), [...state.meta.tag_kinds, "product_type", "players", "name", "publisher"].map((k) => [k, k]));
   loadQueue(); loadBatches();
   const conf = await api("/api/enrich/config").catch(fail);
   if (conf) $("#enrich-config").value = JSON.stringify(conf, null, 2);

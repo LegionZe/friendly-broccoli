@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .db import Library, now
+from .names import clean_name
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,8 @@ _JUNK_TITLE = re.compile(r"^(untitled|microsoft word|document\d*|scan\w*|layout 
 
 def title_from_name(path: Path) -> str:
     stem = path.stem
-    stem = re.sub(r"[_]+", " ", stem)
-    stem = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", stem) if " " not in stem else stem  # CamelCase -> words
-    stem = re.sub(r"\s*\((\d+)\)$", "", stem)  # "Book (1)"
-    return re.sub(r"\s+", " ", stem).strip() or path.name
+    stem = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", stem) if " " not in stem and "_" not in stem else stem  # CamelCase
+    return clean_name(stem)[0] or path.name
 
 
 def pdf_info(path: Path, cover_dir: Path | None, pid: str) -> dict[str, Any]:
@@ -73,13 +72,52 @@ def pdf_info(path: Path, cover_dir: Path | None, pid: str) -> dict[str, Any]:
                 out["cover"] = save_cover(img.data, cover_dir, pid)
     except Exception as e:  # malformed PDFs are common; the product still gets added
         logger.debug("pdf_info failed for %s: %s", path, e)
+    if cover_dir is not None and not out.get("cover"):
+        out["cover"] = render_first_page(path, cover_dir, pid)
     return out
 
 
+def render_first_page(path: Path, cover_dir: Path, pid: str) -> str | None:
+    """Fallback cover: render page 1 with poppler's pdftoppm, if installed
+    (covers vector or multi-image first pages that pypdf can't extract)."""
+    import shutil
+    import subprocess
+
+    exe = shutil.which("pdftoppm")
+    if not exe:
+        return None
+    cover_dir.mkdir(parents=True, exist_ok=True)
+    out = cover_dir / pid
+    try:
+        subprocess.run([exe, "-f", "1", "-l", "1", "-singlefile", "-scale-to", str(COVER_PX * 2), "-jpeg",
+                        str(path), str(out)], check=True, timeout=30, capture_output=True)
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.debug("pdftoppm failed for %s: %s", path, e)
+        return None
+    jpg = out.with_suffix(".jpg")
+    if not jpg.exists():
+        return None
+    try:  # shrink to the normal thumbnail size when Pillow is available
+        from PIL import Image
+        with Image.open(jpg) as im:
+            im.thumbnail((COVER_PX, COVER_PX * 2))
+            im.convert("RGB").save(jpg, "JPEG", quality=82)
+    except Exception:
+        pass
+    return f"/covers/{pid}.jpg"
+
+
+_warned_no_pillow = False
+
+
 def save_cover(data: bytes, cover_dir: Path, pid: str) -> str | None:
+    global _warned_no_pillow
     try:
         from PIL import Image
     except ImportError:
+        if not _warned_no_pillow:
+            _warned_no_pillow = True
+            logger.warning("Pillow is not installed, so covers are skipped: pip install pillow")
         return None
     try:
         im = Image.open(io.BytesIO(data))
@@ -129,7 +167,7 @@ def scan(
     files = iter_files(roots, excl)
     log(f"{len(files)} book file(s) found in {len(roots) - len(missing)} folder(s)")
     known = {r["order_product_id"]: dict(r) for r in lib._q(
-        """SELECT p.order_product_id, p.removed, f.local_path, f.local_size, f.last_modified
+        """SELECT p.order_product_id, p.removed, p.thumb_url, f.local_path, f.local_size, f.last_modified
            FROM products p LEFT JOIN files f USING(order_product_id) WHERE p.source='local'""")}
     by_path = {v["local_path"]: k for k, v in known.items() if v["local_path"]}
     stats = {"found": len(files), "new": 0, "updated": 0, "unchanged": 0, "removed": 0, "errors": 0}
@@ -141,8 +179,9 @@ def scan(
             st = path.stat()
             mtime = datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec="seconds")
             prev = by_path.get(str(path))
+            needs_cover = cover_dir is not None and path.suffix.lower() == ".pdf" and not (prev and known[prev]["thumb_url"])
             if prev and known[prev]["local_size"] == st.st_size and known[prev]["last_modified"] == mtime \
-                    and not known[prev]["removed"]:
+                    and not known[prev]["removed"] and not needs_cover:
                 seen.add(prev)
                 stats["unchanged"] += 1
                 continue
@@ -153,10 +192,11 @@ def scan(
             info = pdf_info(path, cover_dir, pid) if path.suffix.lower() == ".pdf" else {}
             rel = next((path.relative_to(r) for r in roots if r in path.parents), path.name)
             folder = str(Path(rel).parent) if str(Path(rel).parent) != "." else ""
+            title = info.get("title") or title_from_name(path)
             rec = {
                 "order_product_id": pid, "product_id": None,
-                "name": info.get("title") or title_from_name(path),
-                "publisher": None, "date_purchased": None,
+                "name": title,
+                "publisher": clean_name(path.stem)[1], "date_purchased": None,
                 "file_last_modified": mtime, "archived": 0,
                 "cover_url": info.get("cover"), "thumb_url": info.get("cover"),
                 "description": (f"Local file in folder: {folder}" if folder else "Local file")

@@ -256,6 +256,25 @@ def run_rules(
                 queued += lib.suggest(
                     p["order_product_id"], rule["kind"], name, f"rule:{rule['id']}", weights.get(field, 0.6)
                 )
+    # tidy names of local books (from file names) and publishers implied by catalogue codes
+    from .names import clean_name
+
+    counts["names"] = counts["publishers"] = 0
+    examples["names"], examples["publishers"] = [], []
+    for r in lib._q("SELECT order_product_id, name, publisher FROM products WHERE source='local' AND removed=0"):
+        if opids is not None and r["order_product_id"] not in opids:
+            continue
+        new, pub = clean_name(r["name"])
+        for kind, value, cur in (("name", new, r["name"]), ("publisher", pub, r["publisher"])):
+            if not value or value == cur or (kind == "publisher" and cur):
+                continue
+            if lib.is_rejected(r["order_product_id"], kind, value):
+                continue
+            counts[kind + "s"] += 1
+            if len(examples[kind + "s"]) < 5:
+                examples[kind + "s"].append(f"{r['name']} → {value}")
+            if not preview:
+                queued += lib.suggest(r["order_product_id"], kind, value, "rule:names", 0.8 if kind == "name" else 0.7)
     return {"matches": counts, "examples": examples, "queued": queued, "preview": preview}
 
 

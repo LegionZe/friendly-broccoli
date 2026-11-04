@@ -440,6 +440,10 @@ class Library:
             return False
         if kind in TAG_KINDS and self.has_tag(opid, kind, name):
             return False
+        if kind in ("name", "publisher"):  # only for local books, and only if it changes something
+            cur = self._q("SELECT source, name, publisher FROM products WHERE order_product_id=?", (opid,))
+            if not cur or cur[0]["source"] != "local" or (cur[0][kind] or "") == name:
+                return False
         confidence = max(0.0, min(1.0, float(confidence)))
         with self._lock, self.conn:
             cur = self.conn.execute(
@@ -490,11 +494,20 @@ class Library:
     def decide_suggestions(self, f: dict[str, Any], accept: bool) -> int:
         where, args = self._sugg_where({**f, "status": "pending"})
         rows = self._q(f"SELECT * FROM tag_suggestions s WHERE {where}", args)
+        n = 0
         for r in rows:
+            if self._q("SELECT status FROM tag_suggestions WHERE id=?", (r["id"],))[0][0] != "pending":
+                continue  # superseded by an earlier decision in this batch
             if accept:
                 self._apply_suggestion(dict(r))
+                if r["kind"] in ("name", "publisher", "product_type", "players"):
+                    # one value per product: other pending proposals for the same field are moot
+                    self._x("""UPDATE tag_suggestions SET status='superseded'
+                               WHERE order_product_id=? AND kind=? AND id<>? AND status='pending'""",
+                            (r["order_product_id"], r["kind"], r["id"]))
             self._x("UPDATE tag_suggestions SET status=? WHERE id=?", ("accepted" if accept else "rejected", r["id"]))
-        return len(rows)
+            n += 1
+        return n
 
     def _apply_suggestion(self, r: dict[str, Any]) -> None:
         opid, kind, name = r["order_product_id"], r["kind"], r["name"]
@@ -505,6 +518,8 @@ class Library:
         elif kind == "players":
             lo, _, hi = name.partition("-")
             self.update_meta(opid, {"min_players": int(lo), "max_players": int(hi or lo)})
+        elif kind in ("name", "publisher"):
+            self.update_info(opid, {kind: name})
 
     # -- links ------------------------------------------------------------------
     def add_link(self, a: str, b: str, kind: str, note: str | None = None) -> None:

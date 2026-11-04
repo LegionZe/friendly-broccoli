@@ -78,6 +78,8 @@ dtrpg-manager scan "/home/you/RPG PDFs" --save
 - **Identity follows the file's content:** renaming or moving a file keeps its tags and notes, and identical copies count once.
 - **Rescans:** a file that has disappeared is flagged as removed. A folder that is configured but unavailable, such as an unplugged drive, is left alone.
 - **Editing:** name, publisher and description can be edited in the product panel. Rescans keep your edits.
+- **Name tidying:** new scans use tidied names. For books already scanned, **Auto-tag › Keyword rules** suggests tidied names and catalogue-code publishers alongside the tag suggestions, and the Haiku pass suggests proper titles and publishers for names a rule can't fix. All of these go through the review queue.
+- **Covers:** the first page's main image is used, via Pillow. If the first page isn't a single image, the page is rendered with `pdftoppm` (`sudo apt install poppler-utils`). Rescans retry covers for books that have none.
 - **Separate from DriveThruRPG:** sync and downloads never touch local books. **Source** in the library sidebar filters by origin.
 
 ## Automatic tagging

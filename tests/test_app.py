@@ -783,7 +783,7 @@ def test_local_scan(tmp_path):
     st = scan(lib, [str(books), str(dl)], exclude=[str(dl)], cover_dir=covers, log=lambda m: None)
     assert st["found"] == 3 and st["new"] == 3
     local = {i["name"]: i for i in lib.search({"source": "local"})["items"]}
-    assert set(local) == {"Shadowrun Fifth Edition Core", "Weird Thing", "story"}
+    assert set(local) == {"Shadowrun Fifth Edition Core", "Weird Thing", "Story"}
     sr = local["Shadowrun Fifth Edition Core"]
     assert sr["thumb_url"].startswith("/covers/local-") and (covers / sr["thumb_url"].split("/")[-1]).exists()
     assert "Shadowrun" in sr["description"]                      # folder name feeds rules / AI
@@ -835,3 +835,80 @@ def test_local_web(cfg, tmp_path):
     assert r.get_json()["publisher"] == "Me"
     cfg.local_folders = []                                                    # folder removed from settings
     assert c.get(f"/files/{item['order_product_id']}/0").status_code == 404
+
+
+def test_clean_name_examples():
+    from dtrpg_manager.names import clean_name, needs_ai
+    cases = {
+        "01640 - The Battletech Compendium": ("The Battletech Compendium", None),
+        "TSR 9241 - GAZ10 - The Orcs of Thar": ("GAZ10 - The Orcs of Thar", "TSR"),
+        "WEG40129 Adventure Journal 1-4": ("Adventure Journal 1-4", "West End Games"),
+        "fasa 7108 - shadowrun - rigger black book": ("Shadowrun - Rigger Black Book", "FASA"),
+        "(03)Dark Passions eBook 22Jan10": ("Dark Passions", None),
+        "Monster of the Week - Tome of Mysteries Playbooks - 2020-07-22 Update":
+            ("Monster of the Week - Tome of Mysteries Playbooks", None),
+        "TBZ RULEBOOK FINAL": ("TBZ Rulebook", None),
+        "Ironsworn-Starforged-Rules-Summary": ("Ironsworn Starforged Rules Summary", None),
+        "100 Fantasy Kingdoms": ("100 Fantasy Kingdoms", None),
+        "Cyberpunk 2020 - CP3131 Eurotour": ("Cyberpunk 2020 - CP3131 Eurotour", None),
+        "MUH052213 STA BRIEFS TOS Mysteries v1.0": ("STA BRIEFS TOS Mysteries", "Modiphius Entertainment"),
+    }
+    for raw, want in cases.items():
+        assert clean_name(raw) == want, raw
+    for raw in ("startrekadventures discoverycrewpackseason3", "Acr1326", "1417108632783", "M5"):
+        assert needs_ai(clean_name(raw)[0]), raw
+    assert clean_name("warhammerfantasyroleplaywindsofmagic")[0] == "warhammerfantasyroleplaywindsofmagic"
+
+
+def _local(lib, opid, name, publisher=None):
+    rec = {"order_product_id": opid, "product_id": None, "name": name, "publisher": publisher,
+           "date_purchased": None, "file_last_modified": None, "archived": 0, "cover_url": None,
+           "thumb_url": None, "description": "Local file", "slug": None, "filters": [],
+           "files": [{"idx": 0, "filename": name + ".pdf", "checksum": None, "checksum_date": None,
+                      "size": 1, "last_modified": None}]}
+    lib.upsert_product(rec, {}, source="local")
+
+
+def test_name_suggestions_alongside_rules():
+    lib = Library(":memory:")
+    _local(lib, "local-a", "TSR 9068 - X4 - Master of the Desert Nomads")
+    _local(lib, "local-b", "Good Name", publisher="Someone")
+    lib.upsert_product(normalize_product(_prod(7, "TSR 1234 - DTRPG Product")), {})
+    res = enrich.run_rules(lib, enrich.DEFAULT_CONFIG)
+    got = {(s["order_product_id"], s["kind"], s["name"]) for s in lib.suggestions({})["items"]}
+    assert ("local-a", "name", "X4 - Master of the Desert Nomads") in got
+    assert ("local-a", "publisher", "TSR") in got
+    assert not any(o in ("local-b", "7") for o, _, _ in got)    # tidy name / DTRPG product untouched
+    assert res["matches"]["names"] == 1
+    lib.decide_suggestions({"source": "rule:names", "kind": "name"}, accept=True)
+    assert lib.product("local-a")["name"] == "X4 - Master of the Desert Nomads"
+    enrich.run_rules(lib, enrich.DEFAULT_CONFIG)                 # nothing new once tidy
+    assert lib.suggestions({"kind": "name"})["total"] == 0
+
+
+def test_llm_suggests_titles_for_local_only():
+    lib = Library(":memory:")
+    _local(lib, "local-x", "startrekadventures discoverycrewpackseason3")
+    lib.upsert_product(normalize_product(_prod(5, "A DTRPG Book")), {})
+    reply = {"tags": [], "product_type": None, "min_players": None, "max_players": None,
+             "title": "Star Trek Adventures: Discovery Crew Pack Season 3", "publisher": "Modiphius Entertainment"}
+    fake = NS(messages=NS(batches=FakeBatches(reply)))
+    llm.submit(lib, fake)
+    msgs = {r["custom_id"]: r["params"]["messages"][0]["content"] for r in fake.messages.batches.created}
+    assert "Source: local file" in msgs["plocal-x"] and "Source: local file" not in msgs["p5"]
+    llm.collect(lib, fake, "msgbatch_1")
+    got = {(s["order_product_id"], s["kind"], s["name"]) for s in lib.suggestions({"source": "llm"})["items"]}
+    assert ("local-x", "name", "Star Trek Adventures: Discovery Crew Pack Season 3") in got
+    assert ("local-x", "publisher", "Modiphius Entertainment") in got
+    assert not any(o == "5" for o, _, _ in got)                  # never renames DTRPG products
+
+
+def test_cover_fallback_renders_page(tmp_path):
+    import shutil
+    from dtrpg_manager.local import pdf_info
+    if not shutil.which("pdftoppm"):
+        pytest.skip("pdftoppm not installed")
+    pdf = _make_pdf(tmp_path / "vector.pdf")                     # blank page, no embedded image
+    info = pdf_info(pdf, tmp_path / "covers", "local-0123456789abcdef")
+    assert info["cover"] == "/covers/local-0123456789abcdef.jpg"
+    assert (tmp_path / "covers" / "local-0123456789abcdef.jpg").exists()
