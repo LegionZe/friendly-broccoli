@@ -912,3 +912,39 @@ def test_cover_fallback_renders_page(tmp_path):
     info = pdf_info(pdf, tmp_path / "covers", "local-0123456789abcdef")
     assert info["cover"] == "/covers/local-0123456789abcdef.jpg"
     assert (tmp_path / "covers" / "local-0123456789abcdef.jpg").exists()
+
+
+def test_classify_from_content():
+    from dtrpg_manager.classify import classify
+    core = classify("Starfall Core Rulebook", ["Introduction", "Character Creation", "Skills", "Combat",
+                    "Running the Game", "Experience Points"], "roll the dice", 220, 2500)
+    assert core["product_type"][0] == "core-rules" and "bookmarks: character creation" in core["product_type"][2]
+    adv = classify("The Sunken Temple", ["Adventure Background", "Area 1", "Area 2", "Conclusion"],
+                   "Read aloud: you see... Area 3. Area 4. Area 5. Area 6. For characters of 3rd level", 32, 2000)
+    assert adv["product_type"][0] == "adventure"
+    camp = classify("Rise of the Lich King", ["Part One", "Part Two", "Part Three", "Adventure Background",
+                    "Area 1", "Pre-generated characters"], "area 1 area 2 area 3 area 4", 180, 2500)
+    assert camp["product_type"][0] == "campaign"
+    # generic RPG words alone don't make a core rulebook
+    vague = classify("Planar Compass Issue 1", ["Skills", "Combat", "Equipment"], "combat skills gear", 32, 2000)
+    assert vague["product_type"] is None
+    assert classify("Temple of the Weaver for Shadowdark RPG", [], "", 20, 2000)["product_type"] is None
+    solo = classify("Cut Up Solo - Beowulf", [], "", 100, 1500)
+    assert ("tag", "solo") in [(k, n) for k, n, _, _ in solo["tags"]]
+    gb = classify("Fire Mountain", [], "If you fight, turn to 12. Otherwise turn to 40. Turn to 7. turn to 99", 200, 900)
+    assert ("category", "gamebook") in [(k, n) for k, n, _, _ in gb["tags"]]
+    assert classify("Tiny Map", [], "x", 2, 20)["product_type"] is None      # 1-3 page files: no type guess
+
+
+def test_pass3_queues_content_suggestions(tmp_path):
+    lib = _lib_with([{**_prod(1, "Some Book"), "files": [{"index": 0, "filename": "b.pdf", "size": 10}]}])
+    lib._x("""INSERT INTO product_text (order_product_id, path, mtime, pages, meta_json, text, outline, sample_text,
+              version, extracted_at) VALUES ('1','x',0,40,'{"chars_per_page": 2000}','Read aloud: area 1, area 2,
+              area 3, area 4. For characters of 2nd level', '["Adventure Background", "Area 1"]', '', 2, 'now')""")
+    res = enrich.classify_from_content(lib)
+    assert res["product_types"] == 1
+    s = lib.suggestions({"source": "content"})["items"][0]
+    assert (s["kind"], s["name"]) == ("product_type", "adventure") and "read-aloud" in s["evidence"]
+    lib.update_meta("1", {"product_type": "supplement"})                      # typed products are left alone
+    lib.decide_suggestions({"source": "content", "all_matching": True}, accept=False)
+    assert enrich.classify_from_content(lib)["product_types"] == 0

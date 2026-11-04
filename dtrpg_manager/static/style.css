@@ -135,6 +135,7 @@ label.inline input:not([type=checkbox]) { width: 70px; }
 .q-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
 .q-table td { border-top: 1px solid var(--line); padding: 4px; font-size: 13px; vertical-align: middle; }
 .q-table img { width: 28px; border-radius: 3px; }
+.q-table .evidence { font-size: 11px; }
 .q-table .conf { display: inline-block; height: 6px; background: var(--accent); border-radius: 3px; vertical-align: middle; }
 .chip.auto { border: 1px dashed currentColor; }
 .chip .src { opacity: .6; font-size: 10px; }

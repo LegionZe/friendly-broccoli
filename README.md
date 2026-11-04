@@ -90,7 +90,7 @@ The **Auto-tag** page runs four passes. Each tag records where it came from (`ma
 |---|---|---|
 | 1 · DriveThruRPG categories | Genre → `genre` tags, Rule System → `system` tags, Product Type → product type; parent categories included; umbrella labels such as "Other systems" skipped | directly |
 | 2 · Keyword rules | Case-insensitive regular expressions over title, publisher, description and PDF text (D&D 5e, PbtA, Forged in the Dark, OSR, solo, GM-less, one-shot, zine, player counts, …) | suggestions to review |
-| 3 · Read PDFs | Page count, PDF metadata and the first 3 pages' text of each product's largest downloaded PDF (`pypdf`, local) | feeds passes 2 and 4 |
+| 3 · Read PDFs | Page count, bookmarks, PDF metadata, the first 3 pages plus 5 pages sampled through the book (`pypdf`, local). Then suggests what kind of book it is (core rules, adventure, campaign, setting, bestiary, tool, map, …) for products without a type, plus `solo` and `gamebook`, with the evidence it used. | type and tag suggestions to review; feeds passes 2 and 4 |
 | 4 · AI (Claude Haiku 5.5) | Classifies thinly tagged products against your existing vocabulary, via the Message Batches API (50% price) with a JSON-schema response. Shows an estimated cost and asks for confirmation before submitting. | suggestions to review |
 
 The mapping and rules are editable on the same page and are stored in `enrich.json` next to `config.json`. Pass 4 needs the `anthropic` package in the app's virtual environment (`.venv/bin/pip install -e '.[llm]'`, then restart the app) and an Anthropic API key (Settings, or `ANTHROPIC_API_KEY`).
@@ -103,6 +103,12 @@ dtrpg-manager enrich llm-estimate
 dtrpg-manager enrich llm-submit --limit 50
 dtrpg-manager enrich llm-collect
 ```
+
+**How good is the content guess?** Measured on 33 PDFs from a real library whose type DriveThruRPG states:
+- **Product types:** of 28 non-solo books, 4 suggestions matched DriveThruRPG. 2 didn't, and both are arguable: "Gar Campaign Book 3" was guessed as a campaign and "Strange Stars Fate Rule Book" as core rules, while DriveThruRPG labels both settings. The other 22 got no suggestion.
+- **Solo:** found in 4 of 6 solo books, plus 2 books labelled adventures that are in fact solo games.
+
+The rules only suggest when the evidence is clear. Ambiguous books are left to the AI pass, which is also given the bookmarks.
 
 ## Related products
 

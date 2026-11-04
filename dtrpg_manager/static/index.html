@@ -123,7 +123,7 @@
           <p class="hint">Patterns over title, description and PDF text (e.g. “5e”, “solo”, “2–6 players”). Edit them below. Also tidies local book names (catalogue numbers, “eBook”, versions, dates, capitals) and suggests publishers from catalogue codes.</p>
           <button id="p-rules-preview" class="secondary">Preview</button> <button id="p-rules">Queue suggestions</button><pre id="p-rules-out"></pre></div>
         <div class="pass"><h3>3 · Read downloaded PDFs</h3>
-          <p class="hint">Page count, PDF metadata and the first pages' text, used by passes 2 and 4. Runs locally.</p>
+          <p class="hint">Page count, bookmarks and text sampled through each downloaded or local PDF. Then suggests what kind of book it is (core rules, adventure, campaign, setting, bestiary, solo, gamebook…) for products without a type. Runs locally.</p>
           <button id="p-pdf">Read PDFs</button> <label class="check inline"><input id="p-pdf-force" type="checkbox"> re-read all</label><pre id="p-pdf-out"></pre></div>
         <div class="pass"><h3>4 · AI suggestions (Claude Haiku 5.5)</h3>
           <p class="hint">Paid. Uses the Message Batches API (half price, usually done within an hour). Needs an Anthropic API key in Settings.</p>
@@ -137,7 +137,7 @@
 
       <h2>Review queue <span id="q-count" class="hint"></span></h2>
       <div class="row q-filters">
-        <select id="q-source"><option value="">All sources</option><option value="rule">Keyword rules</option><option value="llm">AI (Haiku)</option><option value="rule:names">Name tidying</option></select>
+        <select id="q-source"><option value="">All sources</option><option value="rule">Keyword rules</option><option value="llm">AI (Haiku)</option><option value="rule:names">Name tidying</option><option value="content">PDF content</option></select>
         <select id="q-kind"><option value="">All kinds</option></select>
         <label class="inline">Min confidence <input id="q-conf" type="number" min="0" max="1" step="0.1" value="0"></label>
         <button id="q-accept-all">Accept all shown filters</button>

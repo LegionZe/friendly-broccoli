@@ -99,7 +99,7 @@ def system_prompt(lib: Library) -> str:
 def _product_rows(lib: Library) -> list[dict[str, Any]]:
     rows = lib._q(
         """SELECT p.order_product_id, p.name, p.publisher, p.description, p.source, m.product_type,
-                  t.text AS pdf_text, t.pages,
+                  t.text AS pdf_text, t.pages, t.outline,
                   (SELECT f.filename FROM files f WHERE f.order_product_id=p.order_product_id ORDER BY f.idx LIMIT 1) AS filename
            FROM products p JOIN product_meta m USING(order_product_id)
            LEFT JOIN product_text t USING(order_product_id) WHERE p.removed=0 AND p.archived=0"""
@@ -137,6 +137,10 @@ def user_message(p: dict[str, Any], paths: list[str], include_pdf: bool) -> str:
         parts.append(f"Product type already set: {p['product_type']}")
     if p.get("description"):
         parts.append(f"Description: {p['description']}")
+    if include_pdf and p.get("outline"):
+        titles = json.loads(p["outline"] or "[]")[:60]
+        if titles:
+            parts.append("PDF bookmarks: " + " | ".join(titles))
     if include_pdf and p.get("pdf_text"):
         parts.append(f"First pages of the PDF ({p.get('pages') or '?'} pages total): {p['pdf_text'][:PDF_EXCERPT_CHARS]}")
     return "\n".join(parts)

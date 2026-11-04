@@ -485,7 +485,7 @@ async function loadQueue() {
       <td>${x.thumb_url ? `<img src="${esc(x.thumb_url)}" alt="">` : ""}</td>
       <td><a href="#" data-open="${esc(x.order_product_id)}">${esc(x.product_name)}</a><br><span class="hint">${esc(x.publisher || "")}</span></td>
       <td><span class="chip ${esc(x.kind)}">${esc(x.kind)}: ${esc(x.name)}</span>${x.is_new ? ' <span class="hint">new tag</span>' : ""}</td>
-      <td class="hint">${esc(x.source)}</td>
+      <td class="hint">${esc(x.source)}${x.evidence ? `<br><span class="evidence">${esc(x.evidence)}</span>` : ""}</td>
       <td><span class="conf" style="width:${Math.round(x.confidence * 50)}px"></span> ${x.confidence.toFixed(2)}</td>
       <td><button data-acc="${x.id}">✓</button> <button class="secondary" data-rej="${x.id}">✕</button></td></tr>`).join("") || `<tr><td class="hint">Nothing waiting for review.</td></tr>`;
   $("#q-page").textContent = r.total ? `${qState.offset + 1}–${Math.min(qState.offset + QPAGE, r.total)} of ${r.total}` : "";

@@ -147,7 +147,7 @@ LINK_KINDS = ("related", "same-line", "supplement-of", "requires", "sequel-of")
 STATUSES = ("unread", "reading", "read", "want-to-play", "playing", "played", "shelved")
 TAG_KINDS = ("genre", "category", "system", "setting", "tag")
 PRODUCT_TYPES = (
-    "core-rules", "supplement", "adventure", "setting", "bestiary", "map", "art",
+    "core-rules", "supplement", "adventure", "campaign", "setting", "bestiary", "map", "art",
     "character-sheet", "tool", "fiction", "other",
 )
 META_FIELDS = {
@@ -183,6 +183,13 @@ class Library:
                          ("fail_reason", "TEXT")):
             if col not in f_cols:
                 self.conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typ}")
+        t_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(product_text)")}
+        for col, typ in (("outline", "TEXT"), ("sample_text", "TEXT"), ("version", "INTEGER")):
+            if col not in t_cols:
+                self.conn.execute(f"ALTER TABLE product_text ADD COLUMN {col} {typ}")
+        s_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tag_suggestions)")}
+        if "evidence" not in s_cols:
+            self.conn.execute("ALTER TABLE tag_suggestions ADD COLUMN evidence TEXT")
         pt_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(product_tags)")}
         if "source" not in pt_cols:
             self.conn.execute("ALTER TABLE product_tags ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
@@ -432,7 +439,8 @@ class Library:
         ))
 
     def suggest(
-        self, opid: str, kind: str, name: str, source: str, confidence: float, is_new: bool = False
+        self, opid: str, kind: str, name: str, source: str, confidence: float, is_new: bool = False,
+        evidence: str | None = None,
     ) -> bool:
         """Queue a suggestion unless it is already applied or was decided. Returns True if queued/updated."""
         name = name.strip()
@@ -447,14 +455,16 @@ class Library:
         confidence = max(0.0, min(1.0, float(confidence)))
         with self._lock, self.conn:
             cur = self.conn.execute(
-                """INSERT INTO tag_suggestions (order_product_id, kind, name, source, confidence, is_new, created_at)
-                   VALUES (?,?,?,?,?,?,?)
+                """INSERT INTO tag_suggestions (order_product_id, kind, name, source, confidence, is_new, created_at, evidence)
+                   VALUES (?,?,?,?,?,?,?,?)
                    ON CONFLICT(order_product_id, kind, name) DO UPDATE SET
                        confidence=MAX(tag_suggestions.confidence, excluded.confidence),
                        source=CASE WHEN excluded.confidence > tag_suggestions.confidence
-                                   THEN excluded.source ELSE tag_suggestions.source END
+                                   THEN excluded.source ELSE tag_suggestions.source END,
+                       evidence=CASE WHEN excluded.confidence > tag_suggestions.confidence
+                                   THEN excluded.evidence ELSE COALESCE(tag_suggestions.evidence, excluded.evidence) END
                    WHERE tag_suggestions.status='pending'""",
-                (opid, kind, name, source, confidence, 1 if is_new else 0, now()),
+                (opid, kind, name, source, confidence, 1 if is_new else 0, now(), evidence),
             )
             return cur.rowcount > 0
 

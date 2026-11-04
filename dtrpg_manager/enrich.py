@@ -279,8 +279,33 @@ def run_rules(
 
 
 # -- pass 3 -------------------------------------------------------------------
-PDF_PAGES = 3
+PDF_PAGES = 3          # opening pages kept as `text` (rules, AI excerpt)
 PDF_CHARS = 8000
+SAMPLE_AT = (0.15, 0.3, 0.5, 0.7, 0.85)   # further pages sampled through the book
+SAMPLE_CHARS = 12000
+OUTLINE_MAX = 300
+EXTRACT_VERSION = 2    # bump to re-read every PDF once after a change here
+
+
+def _outline_titles(reader: Any) -> list[str]:
+    out: list[str] = []
+
+    def walk(items: Any) -> None:
+        for it in items:
+            if len(out) >= OUTLINE_MAX:
+                return
+            if isinstance(it, list):
+                walk(it)
+            else:
+                t = str(getattr(it, "title", "") or "").strip()
+                if t:
+                    out.append(re.sub(r"\s+", " ", t)[:150])
+
+    try:
+        walk(reader.outline)
+    except Exception:
+        pass
+    return out
 
 
 def extract_pdfs(
@@ -300,7 +325,7 @@ def extract_pdfs(
     main: dict[str, str] = {}
     for r in rows:  # largest PDF per product = main book
         main.setdefault(r["order_product_id"], r["local_path"])
-    done = {r[0]: (r[1], r[2]) for r in lib._q("SELECT order_product_id, path, mtime FROM product_text")}
+    done = {r[0]: (r[1], r[2], r[3]) for r in lib._q("SELECT order_product_id, path, mtime, version FROM product_text")}
     stats = {"pdfs": len(main), "extracted": 0, "skipped": 0, "errors": 0}
     log(f"{len(main)} products have a downloaded PDF")
     for i, (opid, path) in enumerate(main.items(), 1):
@@ -311,10 +336,10 @@ def extract_pdfs(
             stats["skipped"] += 1
             continue
         mtime = pth.stat().st_mtime
-        if not force and done.get(opid) == (path, mtime):
+        if not force and done.get(opid) == (path, mtime, EXTRACT_VERSION):
             stats["skipped"] += 1
             continue
-        pages = meta = text = err = None
+        pages = meta = text = err = sample = outline = None
         try:
             reader = PdfReader(str(pth))
             if reader.is_encrypted:
@@ -322,20 +347,65 @@ def extract_pdfs(
             pages = len(reader.pages)
             info = reader.metadata or {}
             meta = {k: str(info.get(k)) for k in ("/Title", "/Subject", "/Keywords", "/Author") if info.get(k)}
-            parts = []
-            for page in reader.pages[:PDF_PAGES]:
-                parts.append(page.extract_text() or "")
+            parts = [page.extract_text() or "" for page in reader.pages[:PDF_PAGES]]
             text = re.sub(r"\s+", " ", " ".join(parts)).strip()[:PDF_CHARS]
+            idx = sorted({int(pages * f) for f in SAMPLE_AT} - set(range(PDF_PAGES)))
+            samples = [reader.pages[i].extract_text() or "" for i in idx if i < pages]
+            sample = re.sub(r"\s+", " ", " ".join(samples)).strip()[:SAMPLE_CHARS]
+            read = parts + samples
+            meta["chars_per_page"] = round(sum(len(x) for x in read) / max(1, len(read)), 1)
+            outline = json.dumps(_outline_titles(reader), ensure_ascii=False)
             stats["extracted"] += 1
         except Exception as e:  # malformed PDFs are common; record and move on
             err = f"{type(e).__name__}: {e}"[:300]
             stats["errors"] += 1
         lib._x(
             """INSERT OR REPLACE INTO product_text
-               (order_product_id, path, mtime, pages, meta_json, text, error, extracted_at) VALUES (?,?,?,?,?,?,?,?)""",
-            (opid, path, mtime, pages, json.dumps(meta) if meta else None, text, err, now()),
+               (order_product_id, path, mtime, pages, meta_json, text, error, extracted_at, outline, sample_text, version)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (opid, path, mtime, pages, json.dumps(meta) if meta else None, text, err, now(), outline, sample,
+             EXTRACT_VERSION),
         )
         if i % 25 == 0:
             log(f"{i}/{len(main)} PDFs read")
     log(f"PDF pass finished: {stats}")
+    res = classify_from_content(lib)
+    log(f"Content classification: {res['product_types']} product-type and {res['tags']} tag suggestions queued")
+    stats.update({f"suggested_{k}": v for k, v in res.items()})
     return stats
+
+
+def classify_from_content(lib: Library, opids: list[str] | None = None, preview: bool = False) -> dict[str, Any]:
+    """Queue product-type (and solo/gamebook) suggestions from each PDF's content.
+
+    Only products without a product type get a type suggestion, so DTRPG's own
+    Product Type (pass 1) and your choices are never second-guessed."""
+    from .classify import classify
+
+    rows = lib._q(
+        """SELECT p.order_product_id, p.name, m.product_type, t.text, t.sample_text, t.outline, t.pages, t.meta_json
+           FROM product_text t JOIN products p USING(order_product_id) JOIN product_meta m USING(order_product_id)
+           WHERE p.removed=0 AND t.error IS NULL"""
+    )
+    out = {"product_types": 0, "tags": 0, "examples": []}
+    for r in rows:
+        if opids is not None and r["order_product_id"] not in opids:
+            continue
+        meta = json.loads(r["meta_json"] or "{}")
+        res = classify(r["name"], json.loads(r["outline"] or "[]"), f"{r['text'] or ''} {r['sample_text'] or ''}",
+                       r["pages"], meta.get("chars_per_page"))
+        opid = r["order_product_id"]
+        if res["product_type"] and not r["product_type"]:
+            ptype, conf, ev = res["product_type"]
+            if not lib.is_rejected(opid, "product_type", ptype):
+                out["product_types"] += 1
+                if len(out["examples"]) < 8:
+                    out["examples"].append(f"{r['name']} → {ptype} ({ev})")
+                if not preview:
+                    lib.suggest(opid, "product_type", ptype, "content", conf, evidence=ev)
+        for kind, name, conf, ev in res["tags"]:
+            if not lib.has_tag(opid, kind, name) and not lib.is_rejected(opid, kind, name):
+                out["tags"] += 1
+                if not preview:
+                    lib.suggest(opid, kind, name, "content", conf, evidence=ev)
+    return out
