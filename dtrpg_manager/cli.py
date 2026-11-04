@@ -167,6 +167,9 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         print("preview only" if args.preview else f"queued {res['queued']} suggestions")
     elif step == "pdf":
         enrich.extract_pdfs(lib, print, force=args.force)
+    elif step == "classify":
+        res = enrich.classify_from_content(lib, preview=args.preview)
+        print(json.dumps(res, indent=2, ensure_ascii=False))
     elif step == "llm-estimate":
         print(json.dumps(llm.estimate(lib, args.scope, not args.no_pdf), indent=2))
     elif step == "llm-submit":
@@ -265,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(fn=cmd_scan)
 
     s = sub.add_parser("enrich", help="automatic tagging passes")
-    s.add_argument("step", choices=["dtrpg", "rules", "pdf", "llm-estimate", "llm-submit", "llm-collect", "llm-batches"])
+    s.add_argument("step", choices=["dtrpg", "rules", "pdf", "classify", "llm-estimate", "llm-submit", "llm-collect", "llm-batches"])
     s.add_argument("--preview", action="store_true", help="rules: count matches without queuing")
     s.add_argument("--force", action="store_true", help="pdf: re-read already processed PDFs")
     s.add_argument("--scope", choices=["thin", "all"], default="thin", help="llm: which products")

@@ -375,7 +375,12 @@ def extract_pdfs(
             log(f"{i}/{len(main)} PDFs read")
     log(f"PDF pass finished: {stats}")
     res = classify_from_content(lib)
+    d = res["diagnostics"]
     log(f"Content classification: {res['product_types']} product-type and {res['tags']} tag suggestions queued")
+    log(f"  of {d['products']} products: {d['already_typed']} already have a type, {d['type_suggested']} got a "
+        f"suggestion, {d['undecided']} undecided (left for the AI pass)")
+    log(f"  {d['no_pdf_text']} have no PDF text (not a PDF / not downloaded / unreadable; title only), "
+        f"{d['scanned_no_text_layer']} are scans without a text layer, {d['with_bookmarks']} have bookmarks")
     stats.update({f"suggested_{k}": v for k, v in res.items()})
     return stats
 
@@ -387,19 +392,35 @@ def classify_from_content(lib: Library, opids: list[str] | None = None, preview:
     Product Type (pass 1) and your choices are never second-guessed."""
     from .classify import classify
 
+    # every live product: with PDF text where pass 3 read it, title-only otherwise
     rows = lib._q(
-        """SELECT p.order_product_id, p.name, m.product_type, t.text, t.sample_text, t.outline, t.pages, t.meta_json
-           FROM product_text t JOIN products p USING(order_product_id) JOIN product_meta m USING(order_product_id)
-           WHERE p.removed=0 AND t.error IS NULL"""
+        """SELECT p.order_product_id, p.name, m.product_type, t.text, t.sample_text, t.outline, t.pages, t.meta_json,
+                  t.error
+           FROM products p JOIN product_meta m USING(order_product_id)
+           LEFT JOIN product_text t USING(order_product_id)
+           WHERE p.removed=0"""
     )
     out = {"product_types": 0, "tags": 0, "examples": []}
+    diag = {"products": 0, "already_typed": 0, "no_pdf_text": 0, "scanned_no_text_layer": 0, "with_bookmarks": 0,
+            "type_suggested": 0, "undecided": 0}
     for r in rows:
         if opids is not None and r["order_product_id"] not in opids:
             continue
-        meta = json.loads(r["meta_json"] or "{}")
-        res = classify(r["name"], json.loads(r["outline"] or "[]"), f"{r['text'] or ''} {r['sample_text'] or ''}",
-                       r["pages"], meta.get("chars_per_page"))
+        meta = json.loads(r["meta_json"] or "{}") if not r["error"] else {}
+        outline = json.loads(r["outline"] or "[]") if not r["error"] else []
+        text = f"{r['text'] or ''} {r['sample_text'] or ''}" if not r["error"] else ""
+        res = classify(r["name"], outline, text, r["pages"] if not r["error"] else None, meta.get("chars_per_page"))
         opid = r["order_product_id"]
+        diag["products"] += 1
+        diag["no_pdf_text"] += r["text"] is None
+        diag["scanned_no_text_layer"] += bool(res.get("scanned"))
+        diag["with_bookmarks"] += bool(outline)
+        if r["product_type"]:
+            diag["already_typed"] += 1
+        elif res["product_type"]:
+            diag["type_suggested"] += 1
+        else:
+            diag["undecided"] += 1
         if res["product_type"] and not r["product_type"]:
             ptype, conf, ev = res["product_type"]
             if not lib.is_rejected(opid, "product_type", ptype):
@@ -413,4 +434,5 @@ def classify_from_content(lib: Library, opids: list[str] | None = None, preview:
                 out["tags"] += 1
                 if not preview:
                     lib.suggest(opid, kind, name, "content", conf, evidence=ev)
+    out["diagnostics"] = diag
     return out

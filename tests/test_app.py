@@ -986,3 +986,32 @@ def test_local_scan_skips_undecodable_file_names(tmp_path):
     st = scan(Library(":memory:"), [str(books)], log=msgs.append)
     assert st["new"] == 1 and st["bad_names"] == 1
     assert any("isn't valid UTF-8" in m for m in msgs)
+
+
+def test_classify_scans_titles_and_module_codes():
+    from dtrpg_manager.classify import classify
+    # a short scanned PDF (no text layer) is not a map; its title decides
+    scan = classify("Adventure - Lone Wolves", [], "", 16, 0.0)
+    assert scan["scanned"] and scan["product_type"][0] == "adventure"
+    assert classify("X4 - Master of the Desert Nomads", [], "", 32, 0.0)["product_type"][0] == "adventure"
+    assert classify("GAZ10 - The Orcs of Thar", [], "", 64, 0.0)["product_type"][0] == "setting"
+    assert classify("PHBR10 - The Complete Book of Humanoids", [], "", 128, 0.0)["product_type"][0] == "supplement"
+    # title only (EPUB / not read): pages unknown
+    assert classify("Star League Sourcebook", [], "", None, None)["product_type"][0] == "supplement"
+    assert classify("Star Wars - Adventure Journal #15", [], "", None, None)["product_type"][0] == "other"
+    # false friends seen in a real library
+    for t in ("Monsterhearts 2 - The Chosen", "Monster of the Week - Tome of Mysteries Playbooks",
+              "1 - SAGA EDITION - Star Wars Roleplaying Game", "Deluxe Campaign Notebook Combined",
+              "EC blueprint - Aft Section - deck 3"):
+        assert classify(t, [], "", 24, 0.0)["product_type"] is None, t
+    # low-but-real text density supports "map", but isn't enough on its own
+    assert classify("Untitled", [], "N", 4, 60.0)["product_type"] is None
+    assert classify("Ruins of the Old Keep Map", [], "N", 4, 60.0)["product_type"][0] == "map"
+
+
+def test_classify_title_only_products_and_diagnostics():
+    lib = Library(":memory:")
+    _local(lib, "local-epub", "Star League Sourcebook")                # no product_text row at all
+    res = enrich.classify_from_content(lib)
+    assert res["product_types"] == 1 and res["diagnostics"]["no_pdf_text"] == 1
+    assert lib.suggestions({"source": "content"})["items"][0]["name"] == "supplement"

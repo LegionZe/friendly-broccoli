@@ -71,14 +71,27 @@ SIGNALS: dict[str, list[tuple[str, str, bool]]] = {
 TITLE_HINTS = {
     # (no "...RPG" rule: "Temple of the Weaver for Shadowdark RPG" is an adventure)
     "core-rules": r"\bcore (?:rules|book|rulebook)\b|rule ?book|basic (?:set|rules)|player'?s (?:handbook|guide)|quick ?start|starter (?:set|kit)",
-    "adventure": r"\badventure\b|\bmodule\b|\bscenario\b|one[- ]shot|\bmission\b",
-    "campaign": r"\bcampaign\b(?! setting)|adventure path|\bsaga\b",
-    "setting": r"campaign setting|\bsetting\b|gazetteer|\batlas\b|guide to|\bworld of\b",
-    "bestiary": r"bestiary|monster|creature|critters|\bfoes\b|adversar|beasts",
-    "tool": r"generator|tables|toolkit|\bdeck\b",
+    "adventure": r"\badventure\b(?! journal)|\bmodule\b|\bscenario\b|one[- ]shot|\bmission\b|\bdungeon of\b|\bthe (?:tomb|temple|caverns?|keep|castle) of\b",
+    "supplement": r"source ?book|\bsupplement\b|\bcompanion\b|technical readout|\bexpansion\b|\bcodex\b|equipment guide|\bcatalog(?:ue)?\b|\bhandbook\b(?<!player's handbook)",
+    "other": r"\bmagazine\b|adventure journal|\bissue \d+|newsletter|fanzine",
+    # not bare "campaign"/"saga": "Campaign Notebook", "How to Start a Campaign", "Saga Edition"
+    "campaign": r"adventure path|campaign (?:arc|module|adventure)|\b(?:mega-?)?campaign:\s",
+    "setting": r"campaign setting|\bsetting\b|gazetteer|\batlas\b|guide to|\bworld of\b|galaxy guide|planet(?:ary)? guide|world ?book|campaign guide",
+    # not bare "monster": Monsterhearts, Monster of the Week, Monster Mage are games/playbooks
+    "bestiary": r"bestiary|monster (?:book|manual|compendium|guide|catalog|collection|tome)|monsters (?:and|&|of)\b|creature (?:catalog|compendium|collection|book)|\bcritters\b|\bfoes\b|adversaries|\bbeasts\b",
+    "tool": r"generator|\btables\b|toolkit|\b(?:card|oracle|tarot|spell) deck\b|\b(?:gm|referee|dm|keeper|game ?master'?s?) screen\b",
     "character-sheet": r"character sheet|record sheet",
     "map": r"\bmaps?\b|floor ?plans?|geomorph|battle ?map",
     "fiction": r"\bnovel\b|anthology|short stories",
+}
+# Classic TSR-style module codes at the start of a title ("X4 - Master of the Desert
+# Nomads", "GAZ10 - The Orcs of Thar"), common in collections of old PDFs.
+MODULE_CODE = re.compile(r"^(?P<code>[A-Z]{1,4})\d{1,2}[a-z]?\s*[-–:]\s*\S")
+CODE_TYPES = {
+    **{c: "adventure" for c in ("A", "B", "C", "D", "G", "H", "I", "L", "M", "N", "O", "Q", "S", "T", "U", "X",
+                                "CM", "DL", "DQ", "IM", "OA", "UK", "WG", "WGA", "WGS", "DDA", "XL", "XS")},
+    "GAZ": "setting", "FR": "setting", "PHBR": "supplement", "DMGR": "supplement", "HR": "supplement",
+    "CGR": "supplement", "PC": "supplement",
 }
 SOLO_TITLE = r"\bsolo\b|single[- ]player|\balone\b|solitaire"
 SOLO_TEXT = (r"\bsolo (?:play|game|rpg|adventure|journal|mode|rules)|single[- ]player|play(?:ing)? (?:it )?alone"
@@ -115,10 +128,17 @@ def classify(title: str, outline: list[str], text: str, pages: int | None, chars
         strong.setdefault(ptype, 0)
         evidence.setdefault(ptype, [])
     for ptype, rx in TITLE_HINTS.items():
+        scores.setdefault(ptype, 0.0)
+        strong.setdefault(ptype, 0)
+        evidence.setdefault(ptype, [])
         if re.search(rx, title, re.I):
             scores[ptype] += W["title"]
             strong[ptype] += 1
             evidence[ptype].insert(0, "title")
+    if (m := MODULE_CODE.match(title)) and (ptype := CODE_TYPES.get(m.group("code"))):
+        scores[ptype] += W["title"]
+        strong[ptype] += 1
+        evidence[ptype].insert(0, f"module code {m.group('code')}")
 
     # repetition and shape
     areas = _n(SIGNALS["adventure"][2][1], text)
@@ -139,7 +159,10 @@ def classify(title: str, outline: list[str], text: str, pages: int | None, chars
     if n >= 150 and strong["core-rules"] >= 2:
         scores["core-rules"] += 1.5
         evidence["core-rules"].append(f"{n} pages")
-    if chars_per_page is not None and 0 < n <= 24 and chars_per_page < 200:
+    # A scanned PDF (page images, no text layer) has ~0 characters per page too; that says
+    # nothing about maps, so the density rule needs *some* text (bug found 2026-11-04).
+    scanned = chars_per_page is not None and n > 0 and chars_per_page < 20
+    if chars_per_page is not None and 0 < n <= 24 and 20 <= chars_per_page < 200:
         scores["map"] += 3.0
         strong["map"] += 1
         evidence["map"].append(f"little text ({int(chars_per_page)} characters/page)")
@@ -149,8 +172,9 @@ def classify(title: str, outline: list[str], text: str, pages: int | None, chars
 
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     (best, top), (_, second) = ranked[0], ranked[1]
-    result: dict[str, Any] = {"product_type": None, "tags": [], "scores": scores}
-    if n > 3 and strong.get(best, 0) >= 1 and top >= 4 and top - second >= 2.5:
+    result: dict[str, Any] = {"product_type": None, "tags": [], "scores": scores, "scanned": scanned}
+    # n == 0: no PDF read (EPUB etc., or unreadable) -> title-only; 1-3 pages: not the book itself
+    if (n == 0 or n > 3) and strong.get(best, 0) >= 1 and top >= 4 and top - second >= 2.5:
         conf = round(min(0.85, 0.45 + 0.04 * (top - second) + 0.02 * top), 2)
         result["product_type"] = (best, conf, "; ".join(evidence[best][:5]))
 
