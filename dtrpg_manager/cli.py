@@ -136,6 +136,15 @@ def cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ocr(args: argparse.Namespace) -> int:
+    from . import ocr
+
+    cfg = _cfg(args)
+    ocr.run(Library(cfg.db_path), cfg, print, mode="full" if args.full else "quick", force=args.force,
+            ocr_dir=Path(cfg._path).parent / "ocr", limit=args.limit)
+    return 0
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     from .local import scan
 
@@ -261,6 +270,12 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("import", help="import user metadata JSON")
     s.add_argument("file")
     s.set_defaults(fn=cmd_import)
+
+    s = sub.add_parser("ocr", help="OCR scanned PDFs (needs ocrmypdf); originals are never changed")
+    s.add_argument("--full", action="store_true", help="every page (slow) instead of the pages the app reads")
+    s.add_argument("--force", action="store_true", help="redo books already OCR'd")
+    s.add_argument("--limit", type=int, help="at most this many books")
+    s.set_defaults(fn=cmd_ocr)
 
     s = sub.add_parser("scan", help="index local book files (bought elsewhere / scanned)")
     s.add_argument("folders", nargs="*", help="folders to scan (default: the configured local folders)")

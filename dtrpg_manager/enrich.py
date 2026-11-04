@@ -210,8 +210,10 @@ def apply_dtrpg(lib: Library, conf: dict[str, Any], opids: list[str] | None = No
 # -- pass 2 -------------------------------------------------------------------
 def _texts(lib: Library, opids: list[str] | None) -> list[dict[str, Any]]:
     rows = lib._q(
-        """SELECT p.order_product_id, p.name, p.publisher, p.description, t.text AS pdf_text
-           FROM products p LEFT JOIN product_text t USING(order_product_id) WHERE p.removed=0"""
+        """SELECT p.order_product_id, p.name, p.publisher, p.description,
+                  COALESCE(NULLIF(t.text, ''), NULLIF(o.text || ' ' || COALESCE(o.sample_text, ''), ' ')) AS pdf_text
+           FROM products p LEFT JOIN product_text t USING(order_product_id)
+           LEFT JOIN product_ocr o USING(order_product_id) WHERE p.removed=0"""
     )
     return [dict(r) for r in rows if opids is None or r["order_product_id"] in opids]
 
@@ -395,9 +397,10 @@ def classify_from_content(lib: Library, opids: list[str] | None = None, preview:
     # every live product: with PDF text where pass 3 read it, title-only otherwise
     rows = lib._q(
         """SELECT p.order_product_id, p.name, m.product_type, t.text, t.sample_text, t.outline, t.pages, t.meta_json,
-                  t.error
+                  t.error, o.text AS o_text, o.sample_text AS o_sample, o.chars_per_page AS o_cpp
            FROM products p JOIN product_meta m USING(order_product_id)
            LEFT JOIN product_text t USING(order_product_id)
+           LEFT JOIN product_ocr o ON o.order_product_id=p.order_product_id AND o.error IS NULL
            WHERE p.removed=0"""
     )
     out = {"product_types": 0, "tags": 0, "examples": []}
@@ -409,7 +412,10 @@ def classify_from_content(lib: Library, opids: list[str] | None = None, preview:
         meta = json.loads(r["meta_json"] or "{}") if not r["error"] else {}
         outline = json.loads(r["outline"] or "[]") if not r["error"] else []
         text = f"{r['text'] or ''} {r['sample_text'] or ''}" if not r["error"] else ""
-        res = classify(r["name"], outline, text, r["pages"] if not r["error"] else None, meta.get("chars_per_page"))
+        cpp = meta.get("chars_per_page")
+        if r["o_text"] or r["o_sample"]:  # scanned PDF with OCR text: use it
+            text, cpp = f"{r['o_text'] or ''} {r['o_sample'] or ''}", r["o_cpp"]
+        res = classify(r["name"], outline, text, r["pages"] if not r["error"] else None, cpp)
         opid = r["order_product_id"]
         diag["products"] += 1
         diag["no_pdf_text"] += r["text"] is None

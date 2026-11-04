@@ -376,6 +376,7 @@ async function loadHolds() {
 $("#hold-hours").addEventListener("change", (e) => api("/api/config", { method: "PATCH", body: { hold_failed_hours: Math.max(0, +e.target.value || 0) } }).then(() => { toast("Saved"); loadHolds(); }).catch(fail));
 async function loadSettings() {
   loadHolds();
+  api("/api/config").then((c) => { $("#ocr-cmd").value = c.ocr_command || ""; $("#ocr-lang").value = c.ocr_language || ""; $("#ocr-keep").checked = !!c.ocr_keep_pdf; }).catch(() => {});
   api("/api/config").then((c) => { $("#local-folders").value = (c.local_folders || []).join("\n"); }).catch(() => {});
   const c = await api("/api/config");
   const f = $("#settings-form");
@@ -397,6 +398,9 @@ $("#settings-form").addEventListener("submit", async (e) => {
   loadSettings();
 });
 const saveFolders = () => api("/api/config", { method: "PATCH", body: { local_folders: $("#local-folders").value.split("\n").map((x) => x.trim()).filter(Boolean) } });
+$("#ocr-save").addEventListener("click", () => api("/api/config", { method: "PATCH", body: {
+  ocr_command: $("#ocr-cmd").value.trim() || "ocrmypdf", ocr_language: $("#ocr-lang").value.trim() || "eng", ocr_keep_pdf: $("#ocr-keep").checked } })
+  .then(() => toast("OCR settings saved")).catch(fail));
 $("#local-save").addEventListener("click", () => saveFolders().then(() => toast("Folders saved")).catch(fail));
 $("#local-scan").addEventListener("click", () => saveFolders().then(() => api("/api/local/scan", { method: "POST", body: {} }))
   .then(() => { toast("Scanning — progress under Jobs"); pollJobs(); }).catch(fail));
@@ -466,7 +470,17 @@ function renderLike() {
 const qState = { offset: 0, total: 0 };
 const QPAGE = 50;
 function show(id, data) { $(id).textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); }
+async function loadOcr() {
+  const s = await api("/api/enrich/ocr").catch(() => null); if (!s) return;
+  $("#ocr-status").textContent = s.available
+    ? `${s.pending} waiting · ${s.done} done${s.failed ? ` (${s.failed} failed)` : ""}`
+    : "— ocrmypdf not found: sudo apt install ocrmypdf, then restart the app";
+  $("#p-ocr").disabled = !s.available || !s.pending;
+}
+$("#p-ocr").addEventListener("click", () => api("/api/enrich/ocr", { method: "POST", body: { mode: $("#ocr-mode").value } })
+  .then(() => { show("#p-pdf-out", "OCR started — progress under Settings & sync › Jobs"); }).catch(fail));
 async function loadEnrich() {
+  loadOcr();
   fillSelect($("#q-kind"), [...state.meta.tag_kinds, "product_type", "players", "name", "publisher"].map((k) => [k, k]));
   loadQueue(); loadBatches();
   const conf = await api("/api/enrich/config").catch(fail);

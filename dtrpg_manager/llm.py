@@ -99,7 +99,9 @@ def system_prompt(lib: Library) -> str:
 def _product_rows(lib: Library) -> list[dict[str, Any]]:
     rows = lib._q(
         """SELECT p.order_product_id, p.name, p.publisher, p.description, p.source, m.product_type,
-                  t.text AS pdf_text, t.pages, t.outline,
+                  COALESCE(NULLIF(t.text, ''), (SELECT o.text FROM product_ocr o
+                      WHERE o.order_product_id=p.order_product_id AND o.error IS NULL)) AS pdf_text,
+                  t.pages, t.outline,
                   (SELECT f.filename FROM files f WHERE f.order_product_id=p.order_product_id ORDER BY f.idx LIMIT 1) AS filename
            FROM products p JOIN product_meta m USING(order_product_id)
            LEFT JOIN product_text t USING(order_product_id) WHERE p.removed=0 AND p.archived=0"""

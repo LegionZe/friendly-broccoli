@@ -124,7 +124,11 @@
           <button id="p-rules-preview" class="secondary">Preview</button> <button id="p-rules">Queue suggestions</button><pre id="p-rules-out"></pre></div>
         <div class="pass"><h3>3 · Read downloaded PDFs</h3>
           <p class="hint">Page count, bookmarks and text sampled through each downloaded or local PDF. Then suggests what kind of book it is (core rules, adventure, campaign, setting, bestiary, solo, gamebook…) for products without a type. Runs locally.</p>
-          <button id="p-pdf">Read PDFs</button> <label class="check inline"><input id="p-pdf-force" type="checkbox"> re-read all</label><pre id="p-pdf-out"></pre></div>
+          <button id="p-pdf">Read PDFs</button> <label class="check inline"><input id="p-pdf-force" type="checkbox"> re-read all</label><pre id="p-pdf-out"></pre>
+          <div class="ocr-box"><b>Scanned PDFs</b> <span id="ocr-status" class="hint"></span>
+            <div class="row"><select id="ocr-mode"><option value="quick">Quick: pages the app reads</option><option value="full">Full: every page (slow)</option></select>
+            <button id="p-ocr" class="secondary">OCR scans</button></div>
+            <p class="hint">Uses ocrmypdf + Tesseract. Your files are never changed; the recognised text is stored by the app.</p></div></div>
         <div class="pass"><h3>4 · AI suggestions (Claude Haiku 5.5)</h3>
           <p class="hint">Paid. Uses the Message Batches API (half price, usually done within an hour). Needs an Anthropic API key in Settings.</p>
           <label>Products <select id="p-llm-scope"><option value="thin">Thinly tagged only</option><option value="all">All</option></select></label>
@@ -189,6 +193,13 @@
       <p class="hint">Folders with game books bought elsewhere or scanned (PDF, EPUB, CBZ/CBR, MOBI/AZW3, DjVu). Subfolders are included; files are only read, never moved or changed. One folder per line, e.g. <code>/home/you/RPG PDFs</code>.</p>
       <textarea id="local-folders" rows="3" spellcheck="false"></textarea>
       <div class="row"><button id="local-save" class="secondary">Save folders</button><button id="local-scan">Scan local folders</button></div>
+      <h2>OCR</h2>
+      <div class="row">
+        <label>OCR command <input id="ocr-cmd" placeholder="ocrmypdf"></label>
+        <label>Language <small>(Tesseract codes, e.g. eng+deu)</small> <input id="ocr-lang" placeholder="eng"></label>
+      </div>
+      <label class="check"><input id="ocr-keep" type="checkbox"> In full mode, keep searchable copies in the app folder (uses disk space)</label>
+      <button id="ocr-save" class="secondary">Save OCR settings</button>
       <h2>Downloads on hold</h2>
       <p class="hint">Files whose download failed a check (checksum in strict mode, or not a PDF) are skipped by “Download all” for
         <input id="hold-hours" type="number" min="0" max="720" step="1" style="width:70px"> hours (0 = never hold). Downloading a single file from its product panel ignores the hold.</p>

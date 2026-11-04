@@ -128,6 +128,8 @@ details pre { white-space: pre-wrap; font-size: 11px; max-height: 300px; overflo
 .passes { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
 .pass { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
 .pass h3 { margin: 0 0 4px; font-size: 14px; }
+.ocr-box { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 6px; }
+.ocr-box select { width: auto; }
 .pass pre, #p-llm-batches { font-size: 11px; white-space: pre-wrap; max-height: 180px; overflow: auto; margin: 6px 0 0; }
 label.inline, label.check.inline { display: inline-flex; gap: 4px; align-items: center; margin: 0; }
 label.inline input:not([type=checkbox]) { width: 70px; }

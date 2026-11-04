@@ -16,6 +16,7 @@ from .api import DtrpgApi
 from .related import RelatedIndex, related
 from .config import Config
 from . import local as local_books
+from . import ocr as ocr_mod
 from .db import LINK_KINDS, PRODUCT_TYPES, STATUSES, TAG_KINDS, Library
 from .suggest import suggest
 from .sync import JobManager, download_many, sync_library
@@ -242,6 +243,28 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
         return jsonify(job=jobs.start("local scan", lambda log, cancel: local_books.scan(
             lib, cfg.local_folders, exclude=[cfg.library_path], cover_dir=cover_dir, log=log, cancel=cancel)))
 
+    @app.get("/api/enrich/ocr")
+    def api_ocr_status():
+        return jsonify(ocr_mod.status(lib, cfg))
+
+    @app.post("/api/enrich/ocr")
+    def api_ocr_run():
+        if jobs.running("ocr"):
+            return jsonify(error="OCR is already running"), 409
+        if not ocr_mod.command(cfg):
+            raise ValueError("OCR needs ocrmypdf: sudo apt install ocrmypdf — then restart the app")
+        body = request.get_json()
+        mode = "full" if body.get("mode") == "full" else "quick"
+        return jsonify(job=jobs.start("ocr", lambda log, cancel: ocr_mod.run(
+            lib, cfg, log, mode=mode, force=bool(body.get("force")), cancel=cancel, ocr_dir=cfg_dir / "ocr",
+            limit=body.get("limit"))))
+
+    @app.get("/ocr/<name>")
+    def ocr_copy(name: str):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+\.pdf", name):
+            abort(404)
+        return send_from_directory(cfg_dir / "ocr", name)
+
     @app.patch("/api/products/<opid>/info")
     def update_info(opid: str):
         lib.update_info(opid, request.get_json())
@@ -257,7 +280,8 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
         body = request.get_json()
         allowed = {"api_key", "library_path", "omit_publisher", "validate_checksums",
                    "include_archived", "threads", "page_size", "fetch_filters", "request_timeout", "download_delay",
-                   "anthropic_api_key", "verify_existing", "hold_failed_hours", "local_folders"}
+                   "anthropic_api_key", "verify_existing", "hold_failed_hours", "local_folders",
+                   "ocr_command", "ocr_language", "ocr_keep_pdf"}
         for k, v in body.items():
             if k not in allowed:
                 raise ValueError(f"Unknown setting {k}")

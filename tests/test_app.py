@@ -1015,3 +1015,68 @@ def test_classify_title_only_products_and_diagnostics():
     res = enrich.classify_from_content(lib)
     assert res["product_types"] == 1 and res["diagnostics"]["no_pdf_text"] == 1
     assert lib.suggestions({"source": "content"})["items"][0]["name"] == "supplement"
+
+
+def _ocr_cmd():
+    import shutil
+    import subprocess
+    for cmd in (["ocrmypdf"], ["python3.12", "-m", "ocrmypdf"]):
+        if shutil.which(cmd[0]) and subprocess.run([*cmd, "--version"], capture_output=True).returncode == 0:
+            return " ".join(cmd)
+    return None
+
+
+def _scan_pdf(path, pages_text):
+    from PIL import Image, ImageDraw, ImageFont
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 44)
+    except OSError:
+        font = ImageFont.load_default()
+    ims = []
+    for txt in pages_text:
+        im = Image.new("RGB", (1240, 1754), "white")
+        ImageDraw.Draw(im).multiline_text((100, 150), txt, fill="black", font=font, spacing=20)
+        ims.append(im)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ims[0].save(path, "PDF", resolution=150, save_all=True, append_images=ims[1:])
+    return path
+
+
+def test_ocr_scanned_pdf_end_to_end(tmp_path):
+    from dtrpg_manager import ocr
+    cmd = _ocr_cmd()
+    if not cmd:
+        pytest.skip("ocrmypdf not installed")
+    pdf = _scan_pdf(tmp_path / "scan.pdf", [
+        "ADVENTURE BACKGROUND\nThe tomb was sealed long ago.",
+        "Read aloud: Cold air rushes out.\nArea 1. The Entrance",
+        "Area 2. The Crypt\nArea 3. The Vault",
+        "Area 4. The Shrine\nArea 5. The Pit",
+        "Area 6. The Altar\nConclusion",
+        "Pre-generated characters"])
+    lib = Library(":memory:")
+    _local(lib, "local-scan1", "The Sealed Tomb")
+    lib.mark_downloaded("local-scan1", 0, str(pdf))
+    enrich.extract_pdfs(lib, lambda m: None)
+    assert [c["order_product_id"] for c in ocr.candidates(lib)] == ["local-scan1"]   # detected as a scan
+    cfg = Config()
+    cfg.ocr_command = cmd
+    msgs = []
+    st = ocr.run(lib, cfg, msgs.append)
+    assert st["done"] == 1 and st["with_text"] == 1
+    row = lib._q("SELECT text, sample_text FROM product_ocr")[0]
+    assert "ADVENTURE BACKGROUND" in row["text"].upper()
+    assert ocr.candidates(lib) == []                                                # not redone
+    s = lib.suggestions({"source": "content"})["items"]
+    assert [(x["kind"], x["name"]) for x in s] == [("product_type", "adventure")]
+    assert pdf.read_bytes()[:4] == b"%PDF"                                          # original untouched
+    assert any("Content classification of OCR'd books" in m for m in msgs)
+
+
+def test_ocr_missing_tool_message(tmp_path):
+    from dtrpg_manager import ocr
+    cfg = Config()
+    cfg.ocr_command = "definitely-not-installed-ocr"
+    with pytest.raises(RuntimeError, match="apt install ocrmypdf"):
+        ocr.run(Library(":memory:"), cfg, lambda m: None)
+    assert ocr.page_numbers(100) == [1, 2, 3, 16, 31, 51, 71, 86]

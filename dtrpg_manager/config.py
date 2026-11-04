@@ -24,6 +24,9 @@ class Config:
     api_key: str = ""
     library_path: str = field(default_factory=lambda: str(Path.home() / "DriveThruRPG"))
     local_folders: list = field(default_factory=list)  # folders of books from elsewhere, scanned in place
+    ocr_command: str = "ocrmypdf"  # OCR for scanned PDFs (sudo apt install ocrmypdf)
+    ocr_language: str = "eng"      # Tesseract language code(s), e.g. "eng+deu"
+    ocr_keep_pdf: bool = False     # full mode: keep searchable copies in the app folder
     db_path: str = ""
     omit_publisher: bool = False
     # Reject downloads whose MD5 differs from DriveThruRPG's newest recorded checksum.

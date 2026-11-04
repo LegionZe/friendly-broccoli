@@ -104,6 +104,20 @@ dtrpg-manager enrich llm-submit --limit 50
 dtrpg-manager enrich llm-collect
 ```
 
+**Scanned PDFs (OCR).** Books that are page images with no text layer can be OCR'd with [ocrmypdf](https://ocrmypdf.readthedocs.io/) and Tesseract. Install it once:
+
+```bash
+sudo apt install ocrmypdf
+```
+
+Then use **Auto-tag › Read PDFs › OCR scans**, or `dtrpg-manager ocr [--full] [--limit N]`.
+
+- **Your files are never changed.** Only the recognised text is stored, in a table of its own, so "Read PDFs" can't erase it.
+- **Quick mode** (the default) OCRs only the pages the app reads: the first 3 plus 5 sampled through the book.
+- **Full mode** OCRs every page and can keep searchable copies in the app's folder.
+- **Settings › OCR** sets the language (Tesseract codes, e.g. `eng+deu`, plus the matching `tesseract-ocr-<lang>` package) and the command.
+- **After OCR,** the keyword rules, the content check and the AI pass use the recognised text, and the OCR'd books are classified straight away.
+
 **How good is the content guess?** Measured on 33 PDFs from a real library whose type DriveThruRPG states:
 - **Product types:** of 28 non-solo books, 4 suggestions matched DriveThruRPG. 2 didn't, and both are arguable: "Gar Campaign Book 3" was guessed as a campaign and "Strange Stars Fate Rule Book" as core rules, while DriveThruRPG labels both settings. The other 22 got no suggestion.
 - **Solo:** found in 4 of 6 solo books, plus 2 books labelled adventures that are in fact solo games.

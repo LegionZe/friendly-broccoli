@@ -112,6 +112,21 @@ CREATE TABLE IF NOT EXISTS product_text (
     extracted_at     TEXT NOT NULL
 );
 
+-- OCR text for scanned PDFs (ocr.py); separate so "Read PDFs" never erases it
+CREATE TABLE IF NOT EXISTS product_ocr (
+    order_product_id TEXT PRIMARY KEY REFERENCES products(order_product_id) ON DELETE CASCADE,
+    path             TEXT NOT NULL,
+    mtime            REAL NOT NULL,
+    mode             TEXT NOT NULL,
+    text             TEXT,
+    sample_text      TEXT,
+    chars_per_page   REAL,
+    pages_done       INTEGER,
+    pdf_path         TEXT,
+    error            TEXT,
+    ocr_at           TEXT NOT NULL
+);
+
 -- Haiku batch jobs (pass 4)
 CREATE TABLE IF NOT EXISTS llm_batches (
     id            TEXT PRIMARY KEY,
