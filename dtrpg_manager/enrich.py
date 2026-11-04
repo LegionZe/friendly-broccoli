@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .db import PRODUCT_TYPES, TAG_KINDS, Library, now
+from .normalize import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +300,7 @@ def _outline_titles(reader: Any) -> list[str]:
             else:
                 t = str(getattr(it, "title", "") or "").strip()
                 if t:
-                    out.append(re.sub(r"\s+", " ", t)[:150])
+                    out.append(clean_text(re.sub(r"\s+", " ", t)[:150]))
 
     try:
         walk(reader.outline)
@@ -346,26 +347,30 @@ def extract_pdfs(
                 reader.decrypt("")
             pages = len(reader.pages)
             info = reader.metadata or {}
-            meta = {k: str(info.get(k)) for k in ("/Title", "/Subject", "/Keywords", "/Author") if info.get(k)}
+            meta = {k: clean_text(str(info.get(k))) for k in ("/Title", "/Subject", "/Keywords", "/Author") if info.get(k)}
             parts = [page.extract_text() or "" for page in reader.pages[:PDF_PAGES]]
-            text = re.sub(r"\s+", " ", " ".join(parts)).strip()[:PDF_CHARS]
+            text = clean_text(re.sub(r"\s+", " ", " ".join(parts)).strip()[:PDF_CHARS])
             idx = sorted({int(pages * f) for f in SAMPLE_AT} - set(range(PDF_PAGES)))
             samples = [reader.pages[i].extract_text() or "" for i in idx if i < pages]
-            sample = re.sub(r"\s+", " ", " ".join(samples)).strip()[:SAMPLE_CHARS]
+            sample = clean_text(re.sub(r"\s+", " ", " ".join(samples)).strip()[:SAMPLE_CHARS])
             read = parts + samples
             meta["chars_per_page"] = round(sum(len(x) for x in read) / max(1, len(read)), 1)
             outline = json.dumps(_outline_titles(reader), ensure_ascii=False)
             stats["extracted"] += 1
         except Exception as e:  # malformed PDFs are common; record and move on
-            err = f"{type(e).__name__}: {e}"[:300]
+            err = clean_text(f"{type(e).__name__}: {e}"[:300])
             stats["errors"] += 1
-        lib._x(
-            """INSERT OR REPLACE INTO product_text
+        sql = """INSERT OR REPLACE INTO product_text
                (order_product_id, path, mtime, pages, meta_json, text, error, extracted_at, outline, sample_text, version)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (opid, path, mtime, pages, json.dumps(meta) if meta else None, text, err, now(), outline, sample,
-             EXTRACT_VERSION),
-        )
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)"""
+        try:
+            lib._x(sql, (opid, clean_text(path), mtime, pages, json.dumps(meta) if meta else None, text, err, now(),
+                         outline, sample, EXTRACT_VERSION))
+        except Exception as e:  # never let one PDF stop the whole pass
+            stats["errors"] += 1
+            log(f"Could not store text of {Path(path).name!r}: {type(e).__name__}: {e}")
+            lib._x(sql, (opid, clean_text(path), mtime, pages, None, None, clean_text(f"store failed: {e}"[:300]),
+                         now(), None, None, EXTRACT_VERSION))
         if i % 25 == 0:
             log(f"{i}/{len(main)} PDFs read")
     log(f"PDF pass finished: {stats}")

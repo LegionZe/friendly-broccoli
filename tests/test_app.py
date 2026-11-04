@@ -948,3 +948,41 @@ def test_pass3_queues_content_suggestions(tmp_path):
     lib.update_meta("1", {"product_type": "supplement"})                      # typed products are left alone
     lib.decide_suggestions({"source": "content", "all_matching": True}, accept=False)
     assert enrich.classify_from_content(lib)["product_types"] == 0
+
+
+def test_clean_text_surrogates():
+    from dtrpg_manager.normalize import clean_text
+    assert clean_text("plain") == "plain"
+    assert clean_text("smile 😀 ok") == "smile \U0001F600 ok"   # valid pair recombined
+    out = clean_text("bad \ud83d here")                                   # lone surrogate
+    out.encode("utf-8")
+    assert out.startswith("bad ") and out.endswith(" here")
+
+
+def test_pass3_survives_surrogates_in_pdf_text(tmp_path, monkeypatch):
+    import pypdf
+    pdf = _make_pdf(tmp_path / "odd.pdf")
+    good = _make_pdf(tmp_path / "good.pdf")
+    lib = _lib_with([{**_prod(1, "Odd"), "files": [{"index": 0, "filename": "odd.pdf", "size": 10}]},
+                     {**_prod(2, "Good"), "files": [{"index": 0, "filename": "good.pdf", "size": 10}]}])
+    lib.mark_downloaded("1", 0, str(pdf))
+    lib.mark_downloaded("2", 0, str(good))
+    monkeypatch.setattr(pypdf.PageObject, "extract_text", lambda self, *a, **k: "Chapter \ud835 one")
+    stats = enrich.extract_pdfs(lib, lambda m: None)                      # used to raise UnicodeEncodeError
+    assert stats["extracted"] == 2
+    texts = [r[0] for r in lib._q("SELECT text FROM product_text ORDER BY order_product_id")]
+    assert all(t.startswith("Chapter ") for t in texts)
+
+
+def test_local_scan_skips_undecodable_file_names(tmp_path):
+    import os
+    from dtrpg_manager.local import scan
+    books = tmp_path / "books"
+    _make_pdf(books / "fine.pdf")
+    bad = os.path.join(os.fsencode(books), b"caf\xe9.pdf")                 # Latin-1 byte, not UTF-8
+    with open(bad, "wb") as fh:
+        fh.write((books / "fine.pdf").read_bytes() + b"%x")
+    msgs = []
+    st = scan(Library(":memory:"), [str(books)], log=msgs.append)
+    assert st["new"] == 1 and st["bad_names"] == 1
+    assert any("isn't valid UTF-8" in m for m in msgs)

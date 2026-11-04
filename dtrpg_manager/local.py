@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from .db import Library, now
 from .names import clean_name
+from .normalize import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,10 @@ def pdf_info(path: Path, cover_dir: Path | None, pid: str) -> dict[str, Any]:
         if reader.is_encrypted:
             reader.decrypt("")
         meta = reader.metadata or {}
-        title = str(meta.get("/Title") or "").strip()
+        title = clean_text(str(meta.get("/Title") or "")).strip()
         if 3 < len(title) < 150 and not _JUNK_TITLE.search(title):
             out["title"] = title
-        author = str(meta.get("/Author") or "").strip()
+        author = clean_text(str(meta.get("/Author") or "")).strip()
         if 1 < len(author) < 80:
             out["author"] = author
         if cover_dir is not None and reader.pages:
@@ -133,7 +134,16 @@ def save_cover(data: bytes, cover_dir: Path, pid: str) -> str | None:
         return None
 
 
-def iter_files(roots: list[Path], exclude: list[Path]) -> list[Path]:
+def _storable(p: Path) -> bool:
+    """Linux allows file names that aren't valid UTF-8; they can't be stored or served faithfully."""
+    try:
+        str(p).encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def iter_files(roots: list[Path], exclude: list[Path], skipped: list[str] | None = None) -> list[Path]:
     out = []
     for root in roots:
         if not root.is_dir():
@@ -146,7 +156,10 @@ def iter_files(roots: list[Path], exclude: list[Path]) -> list[Path]:
             dirnames[:] = sorted(n for n in dirnames if not n.startswith("."))
             for name in sorted(filenames):
                 if not name.startswith(".") and Path(name).suffix.lower() in EXTENSIONS:
-                    out.append(d / name)
+                    if _storable(d / name):
+                        out.append(d / name)
+                    elif skipped is not None:
+                        skipped.append(clean_text(str(d / name)))
     return out
 
 
@@ -164,13 +177,17 @@ def scan(
     for m in missing:
         log(f"Folder not found: {m}")
     excl = [Path(e).expanduser().resolve() for e in exclude if e]
-    files = iter_files(roots, excl)
+    bad_names: list[str] = []
+    files = iter_files(roots, excl, bad_names)
     log(f"{len(files)} book file(s) found in {len(roots) - len(missing)} folder(s)")
+    for b in bad_names[:20]:
+        log(f"Skipped (file name isn't valid UTF-8 — rename it): {b}")
     known = {r["order_product_id"]: dict(r) for r in lib._q(
         """SELECT p.order_product_id, p.removed, p.thumb_url, f.local_path, f.local_size, f.last_modified
            FROM products p LEFT JOIN files f USING(order_product_id) WHERE p.source='local'""")}
     by_path = {v["local_path"]: k for k, v in known.items() if v["local_path"]}
-    stats = {"found": len(files), "new": 0, "updated": 0, "unchanged": 0, "removed": 0, "errors": 0}
+    stats = {"found": len(files), "new": 0, "updated": 0, "unchanged": 0, "removed": 0, "errors": 0,
+             "bad_names": len(bad_names)}
     seen: set[str] = set()
     for i, path in enumerate(files, 1):
         if cancel is not None and cancel.is_set():
@@ -208,9 +225,9 @@ def scan(
             is_new = lib.upsert_product(rec, {"source": "local", "path": str(path)}, source="local")
             lib.mark_downloaded(pid, 0, str(path), size=st.st_size)
             stats["new" if is_new else "updated"] += 1
-        except OSError as e:
+        except Exception as e:  # one unreadable/odd file must not stop the scan
             stats["errors"] += 1
-            log(f"Could not read {path}: {e}")
+            log(f"Could not add {clean_text(str(path))}: {type(e).__name__}: {e}")
         if i % 100 == 0:
             log(f"{i}/{len(files)} files checked")
     if not (cancel is not None and cancel.is_set()):

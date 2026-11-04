@@ -21,6 +21,23 @@ import re
 from typing import Any
 
 
+def clean_text(s: str | None) -> str | None:
+    """Make text storable as UTF-8.
+
+    PDF text extraction can yield UTF-16 surrogate code points (observed
+    2026-11-04: "surrogates not allowed" while saving a PDF's text). Valid
+    pairs are recombined (emoji etc. survive); lone ones become U+FFFD.
+    """
+    if s is None:
+        return None
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        s = s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+        return s.encode("utf-8", "replace").decode("utf-8")
+
+
 def first(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
     for k in keys:
         cur: Any = d
