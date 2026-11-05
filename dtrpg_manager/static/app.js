@@ -50,6 +50,7 @@ async function loadMeta() {
   $("#tag-names").innerHTML = [...new Set(m.tags.map((t) => t.name))].map((n) => `<option value="${esc(n)}">`).join("");
   renderFacets();
   renderSuggestTags();
+  if (m.duplicates) $("#dup-count").textContent = m.duplicates.hidden ? `(${m.duplicates.hidden})` : "";
   api("/api/suggestions?limit=1").then((r) => { const b = $("#sugg-badge"); b.textContent = r.total; b.classList.toggle("hidden", !r.total); }).catch(() => {});
 }
 // DTRPG categories: each filter has parent_id (immediate parent) and
@@ -118,6 +119,7 @@ function libraryParams() {
   if ($("#f-fav").checked) p.set("favourite", "1");
   if ($("#f-untagged").checked) p.set("untagged", "1");
   if ($("#f-archived").checked) p.set("include_archived", "1");
+  if ($("#hide-dups").checked) p.set("hide_duplicates", "1");
   state.tagSel.forEach((t) => p.append("tag", t));
   state.filterSel.forEach((f) => p.append("filter", f));
   return p;
@@ -126,7 +128,8 @@ function card(p, selectable = true) {
   const img = p.thumb_url || p.cover_url;
   const cover = img ? `style="background-image:url('${esc(img)}')"` : "";
   const dl = p.file_count ? `<span class="badge" title="files downloaded">${p.downloaded_count ?? 0}/${p.file_count}</span>` : "";
-  const fav = (p.source === "local" ? `<span class="badge" title="local file">LOCAL</span>` : "") + (p.favourite ? `<span class="badge">★</span>` : "");
+  const dupBadge = p.hidden_copies ? `<span class="badge" title="${p.hidden_copies} duplicate cop${p.hidden_copies === 1 ? "y" : "ies"} hidden">+${p.hidden_copies}</span>` : "";
+  const fav = dupBadge + (p.source === "local" ? `<span class="badge" title="local file">LOCAL</span>` : "") + (p.favourite ? `<span class="badge">★</span>` : "");
   const rating = p.rating ? `<span class="badge">${"★".repeat(p.rating)}</span>` : "";
   return `<div class="card" data-id="${esc(p.order_product_id)}">
     ${selectable ? `<input type="checkbox" class="sel" ${state.selected.has(p.order_product_id) ? "checked" : ""}>` : ""}
@@ -180,6 +183,11 @@ document.addEventListener("click", (e) => {
 $("#f-clear").addEventListener("click", () => { clearFilterInputs(); renderFacets(); reload(); });
 $("#prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - PAGE); loadLibrary().catch(fail); });
 $("#next").addEventListener("click", () => { state.offset += PAGE; loadLibrary().catch(fail); });
+try { $("#hide-dups").checked = localStorage.getItem("hideDups") === "1"; } catch (e) { /* storage unavailable */ }
+$("#hide-dups").addEventListener("change", (e) => {
+  try { localStorage.setItem("hideDups", e.target.checked ? "1" : "0"); } catch (err) { /* ignore */ }
+  reload();
+});
 $("#view-toggle").addEventListener("click", (e) => { state.listView = !state.listView; e.target.textContent = state.listView ? "Grid view" : "List view"; loadLibrary(); });
 $("#select-all").addEventListener("change", (e) => { $$("#grid .card").forEach((c) => { $(".sel", c).checked = e.target.checked; toggle(state.selected, c.dataset.id, e.target.checked); }); updateBulk(); });
 function updateBulk() { $("#bulk").classList.toggle("hidden", state.selected.size === 0); $("#bulk-tag").textContent = `Tag ${state.selected.size} selected`; }
@@ -234,6 +242,8 @@ async function openProduct(id) {
       <td>${f.local_path ? `<a href="/files/${encodeURIComponent(p.order_product_id)}/${f.idx}" target="_blank">Open</a>` : ""}</td>
       <td>${p.source === "local" ? `<span class="hint">${esc(f.local_path || "")}</span>` : `<button class="secondary" data-dl="${f.idx}">${f.local_path ? "Re-download" : "Download"}</button>`}</td></tr>`).join("") || "<tr><td>No files listed</td></tr>"}</table>
     ${p.source === "local" ? "" : `<div class="row" style="margin-top:8px"><button id="d-dlall">Download all files</button></div>`}
+    ${p.copies && p.copies.length ? `<h3>Copies in your library</h3><ul class="rel-list">${p.copies.map((c) =>
+      `<li data-open="${esc(c.order_product_id)}"><span>${esc(c.name)} <span class="why">${c.source === "local" ? "local file" : "DriveThruRPG"} · ${c.tag_count} tag${c.tag_count === 1 ? "" : "s"}${c.keeper ? " · shown when hiding duplicates" : ""}</span></span></li>`).join("")}</ul>` : ""}
     <h3>Related <button id="d-like" class="secondary" title="Random pick among similar products">🎲 Something like this</button></h3>
     <div id="d-related" class="hint">Loading…</div>
     <div class="link-add"><select id="d-linkkind">${(m.link_kinds || []).map((k) => `<option>${esc(k)}</option>`).join("")}</select>
@@ -246,6 +256,7 @@ async function openProduct(id) {
   };
   renderTags(p.tags);
   loadDrawerSuggestions(id);
+  $$(".drawer [data-open]").forEach((li) => li.closest("#d-related") || li.addEventListener("click", () => openProduct(li.dataset.open)));
   loadRelated(id);
   $("#d-like").addEventListener("click", () => { state.like = { id, name: p.name }; $("#drawer").classList.add("hidden"); $('nav button[data-view="suggest"]').click(); renderLike(); $("#roll").click(); });
   let linkTimer;
@@ -331,6 +342,7 @@ $("#roll").addEventListener("click", async () => {
   if ($("#s-players").value) p.set("players", $("#s-players").value);
   if ($("#s-rating").value) p.set("min_rating", $("#s-rating").value);
   if ($("#s-fav").checked) p.set("favourite", "1");
+  if ($("#s-nodups").checked) p.set("hide_duplicates", "1");
   p.set("count", $("#s-count").value || 1);
   p.set("weighted", $("#s-weighted").checked ? "1" : "0");
   if (state.like) p.set("like", state.like.id);

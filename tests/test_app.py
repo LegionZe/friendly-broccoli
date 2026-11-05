@@ -1080,3 +1080,50 @@ def test_ocr_missing_tool_message(tmp_path):
     with pytest.raises(RuntimeError, match="apt install ocrmypdf"):
         ocr.run(Library(":memory:"), cfg, lambda m: None)
     assert ocr.page_numbers(100) == [1, 2, 3, 16, 31, 51, 71, 86]
+
+
+def test_title_key_and_groups():
+    from dtrpg_manager.dedupe import title_key
+    assert title_key("T2013- Twilight 2013 Core Rules") == title_key("T2013- Twilight: 2013 Core Rules")
+    assert title_key("The Conspiracies Sourcebook") == title_key("Conspiracies Sourcebook")
+    assert title_key("STA Shackleton Expanse Campaign Guide v1.1") == title_key("STA Shackleton Expanse Campaign Guide v1.2")
+    assert title_key("Old School Essentials Classic Fantasy Rules Tome") == title_key("Old-School Essentials Classic Fantasy: Rules Tome")
+    assert title_key("Dungeons & Dragons") == title_key("Dungeons and Dragons")
+    for generic in ("Rulebook", "Character Sheet", "Map", "War"):
+        assert title_key(generic) is None, generic
+    assert title_key("Shadowrun: Attitude") != title_key("Shadowrun: Parazoology")
+
+
+def test_hide_duplicates_keeps_most_tagged():
+    lib = Library(":memory:")
+    lib.upsert_product(normalize_product(_prod(1, "Qin Legends")), {})          # DTRPG copy
+    _local(lib, "local-q1", "Qin Legends")                                       # local copies
+    _local(lib, "local-q2", "qin legends (1)")
+    _local(lib, "local-x", "Something Else")
+    lib.add_tag("1", "genre", "wuxia")
+    ids = lambda **f: sorted(i["order_product_id"] for i in lib.search(f)["items"])
+    assert ids() == ["1", "local-q1", "local-q2", "local-x"]
+    assert ids(hide_duplicates=True) == ["1", "local-x"]
+    keeper = next(i for i in lib.search({"hide_duplicates": True})["items"] if i["order_product_id"] == "1")
+    assert keeper["hidden_copies"] == 2
+    # tagging a local copy more makes it the keeper (cache refreshes on writes)
+    for t in ("a", "b"):
+        lib.add_tag("local-q2", "tag", t)
+    assert ids(hide_duplicates=True) == ["local-q2", "local-x"]
+    copies = lib.product("local-q2")["copies"]
+    assert {c["order_product_id"] for c in copies} == {"1", "local-q1"} and not any(c["keeper"] for c in copies)
+    assert lib.duplicate_stats() == {"groups": 1, "hidden": 2}
+    # random picks can skip copies too
+    picks = suggest(lib, {"hide_duplicates": True}, count=10, avoid_recent=0, rng=random.Random(0))
+    assert sorted(p["order_product_id"] for p in picks) == ["local-q2", "local-x"]
+
+
+def test_web_hide_duplicates(cfg):
+    from dtrpg_manager.web import create_app
+    lib = Library(":memory:")
+    lib.upsert_product(normalize_product(_prod(1, "Burning Horizon")), {})
+    _local(lib, "local-b", "Burning Horizon")
+    c = create_app(cfg, lib).test_client()
+    assert c.get("/api/products").get_json()["total"] == 2
+    assert c.get("/api/products?hide_duplicates=1").get_json()["total"] == 1
+    assert c.get("/api/meta").get_json()["duplicates"] == {"groups": 1, "hidden": 1}

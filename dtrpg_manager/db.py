@@ -185,6 +185,9 @@ class Library:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self._migrate()
+        self._dup_fp: int | None = None
+        self._dup_groups: dict[str, list[dict[str, Any]]] = {}
+        self._dup_of: dict[str, str] = {}
 
     def _migrate(self) -> None:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(products)")}
@@ -624,8 +627,47 @@ class Library:
         ]
 
     # -- querying ---------------------------------------------------------
+    # -- duplicates ---------------------------------------------------------
+    def _refresh_duplicates(self) -> None:
+        """Recompute title-duplicate groups when anything was written since last time."""
+        from .dedupe import groups
+
+        with self._lock:
+            fp = self.conn.total_changes
+            if fp == self._dup_fp:
+                return
+            rows = [dict(r) for r in self.conn.execute(
+                """SELECT p.order_product_id, p.name, p.source,
+                          (SELECT COUNT(*) FROM product_tags t WHERE t.order_product_id=p.order_product_id) AS tag_count,
+                          (SELECT COUNT(*) FROM files f WHERE f.order_product_id=p.order_product_id
+                               AND f.local_path IS NOT NULL) AS downloaded
+                   FROM products p WHERE p.removed=0""")]
+            self._dup_groups = groups(rows)
+            self._dup_of = {m["order_product_id"]: g[0]["order_product_id"]
+                            for g in self._dup_groups.values() for m in g[1:]}
+            self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS dup_hidden (id TEXT PRIMARY KEY)")
+            self.conn.execute("DELETE FROM dup_hidden")
+            self.conn.executemany("INSERT INTO dup_hidden VALUES (?)", [(i,) for i in self._dup_of])
+            self.conn.commit()
+            self._dup_fp = self.conn.total_changes  # our own writes above don't count as changes
+
+    def copies(self, opid: str) -> list[dict[str, Any]]:
+        """Other products with the same title; keeper first."""
+        self._refresh_duplicates()
+        for g in self._dup_groups.values():
+            if any(m["order_product_id"] == opid for m in g):
+                return [{**m, "keeper": i == 0} for i, m in enumerate(g) if m["order_product_id"] != opid]
+        return []
+
+    def duplicate_stats(self) -> dict[str, int]:
+        self._refresh_duplicates()
+        return {"groups": len(self._dup_groups), "hidden": len(self._dup_of)}
+
     def _where(self, f: dict[str, Any]) -> tuple[str, list[Any]]:
         clauses = ["p.removed=0"]
+        if f.get("hide_duplicates"):
+            self._refresh_duplicates()
+            clauses.append("p.order_product_id NOT IN (SELECT id FROM dup_hidden)")
         args: list[Any] = []
         if not f.get("include_archived"):
             clauses.append("p.archived=0")
@@ -724,6 +766,12 @@ class Library:
         )
         items = [dict(r) for r in rows]
         self._attach_tags(items)
+        if f.get("hide_duplicates"):  # keepers show how many copies are hidden behind them
+            hidden_per = {}
+            for dup, keeper in self._dup_of.items():
+                hidden_per[keeper] = hidden_per.get(keeper, 0) + 1
+            for i in items:
+                i["hidden_copies"] = hidden_per.get(i["order_product_id"], 0)
         return {"total": total, "items": items}
 
     def candidate_ids(self, f: dict[str, Any]) -> list[dict[str, Any]]:
@@ -775,6 +823,7 @@ class Library:
         item["files"] = self.files_for(opid)
         pt = self._q("SELECT pages FROM product_text WHERE order_product_id=?", (opid,))
         item["pages"] = pt[0]["pages"] if pt else None
+        item["copies"] = self.copies(opid)
         self._attach_tags([item])
         return item
 

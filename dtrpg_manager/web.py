@@ -40,6 +40,7 @@ def _filters_from_args(args: Any) -> dict[str, Any]:
         "any_filter_ids": args.getlist("any_filter"),
         "untagged": args.get("untagged") in ("1", "true"),
         "source": args.get("source"),
+        "hide_duplicates": args.get("hide_duplicates") in ("1", "true"),
         "include_archived": args.get("include_archived") in ("1", "true"),
         "sort": args.get("sort"),
     }
@@ -83,7 +84,7 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
         return jsonify(
             statuses=STATUSES, tag_kinds=TAG_KINDS, product_types=PRODUCT_TYPES, link_kinds=LINK_KINDS,
             tags=lib.tags(), dtrpg_filters=lib.dtrpg_filters(), publishers=lib.publishers(),
-            stats=lib.stats(), config=cfg.public(),
+            stats=lib.stats(), config=cfg.public(), duplicates=lib.duplicate_stats(),
         )
 
     # -- products ---------------------------------------------------------

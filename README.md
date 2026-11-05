@@ -124,6 +124,16 @@ Then use **Auto-tag › Read PDFs › OCR scans**, or `dtrpg-manager ocr [--full
 
 The rules only suggest when the evidence is clear. Ambiguous books are left to the AI pass, which is also given the bookmarks.
 
+## Duplicates
+
+**Hide duplicates**, above the library grid, shows one copy per title. It is remembered per browser. Random pick has a matching **Skip duplicate copies** option, on by default.
+
+- **Matching:** titles are compared after the same tidying used for local names, so case, punctuation, "&"/"and", a leading "The/A/An", version and date stamps and catalogue numbers don't matter. Very generic titles ("Rulebook", "Character Sheet", "Map", …) are never treated as duplicates.
+- **Which copy is kept:** the one with the most tags. Ties go to the DriveThruRPG copy, then to the copy with more files downloaded.
+- **Seeing hidden copies:** the kept copy shows **+N**, and its product panel lists the other copies.
+
+On a real library of 5,980 products this found 255 groups and hid 334 copies.
+
 ## Related products
 
 Each product's detail panel lists:

@@ -57,6 +57,7 @@
           <button id="bulk-download">Download selected</button>
         </span>
         <span class="spacer"></span>
+        <label class="check" title="Same title (ignoring case, punctuation, versions, catalogue numbers): show only the copy with the most tags"><input id="hide-dups" type="checkbox"> Hide duplicates <span id="dup-count" class="hint"></span></label>
         <button id="view-toggle" class="secondary">List view</button>
       </div>
       <div id="grid" class="grid"></div>
@@ -92,6 +93,7 @@
         <label>How many <input id="s-count" type="number" min="1" max="20" value="1"></label>
         <label class="check"><input id="s-weighted" type="checkbox" checked> Weighted</label>
         <label class="check"><input id="s-fav" type="checkbox"> Favourites only</label>
+        <label class="check"><input id="s-nodups" type="checkbox" checked> Skip duplicate copies</label>
       </div>
       <div id="s-like" class="like-chip hidden"></div>
       <button id="roll" class="big">🎲 Roll</button>
