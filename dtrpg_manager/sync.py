@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .api import USER_AGENT, ApiError, DtrpgApi
+from .api import USER_AGENT, ApiError, DtrpgApi, SyncCancelled
 from .config import Config
 from .db import Library, now
 from .normalize import normalize_product, safe_path_part
@@ -22,25 +22,37 @@ from .normalize import normalize_product, safe_path_part
 logger = logging.getLogger(__name__)
 
 
-def sync_library(api: DtrpgApi, lib: Library, cfg: Config, progress: Callable[[str], None] = print) -> dict:
+def list_products(api: DtrpgApi, cfg: Config, archived: bool, checksums: bool,
+                  progress: Callable[[str], None], cancel: Any) -> Any:
+    return api.iter_products(cfg.page_size, archived=archived, filters=cfg.fetch_filters, progress=progress,
+                             checksums=checksums, cancel=cancel)
+
+
+def sync_library(api: DtrpgApi, lib: Library, cfg: Config, progress: Callable[[str], None] = print,
+                 cancel: threading.Event | None = None) -> dict:
     progress("Authenticating")
     api.authenticate()
     seen: set[str] = set()
     new = 0
     for archived in (False, True) if cfg.include_archived else (False,):
         progress("Fetching archived products" if archived else "Fetching library")
-        for raw in api.iter_products(
-            cfg.page_size, archived=archived, filters=cfg.fetch_filters, progress=progress
-        ):
-            try:
-                rec = normalize_product(raw)
-            except ValueError as e:
-                logger.warning("Skipping product: %s", e)
-                continue
-            if archived:
-                rec["archived"] = 1
-            new += lib.upsert_product(rec, raw)
-            seen.add(rec["order_product_id"])
+        # checksums only when something uses them (strict mode / verifying existing files)
+        want_checksums = bool(cfg.validate_checksums or cfg.verify_existing)
+        try:
+            for raw in list_products(api, cfg, archived, want_checksums, progress, cancel):
+                try:
+                    rec = normalize_product(raw)
+                except ValueError as e:
+                    logger.warning("Skipping product: %s", e)
+                    continue
+                if archived:
+                    rec["archived"] = 1
+                new += lib.upsert_product(rec, raw)
+                seen.add(rec["order_product_id"])
+        except SyncCancelled:
+            # products fetched so far are saved; removal marking needs a complete listing
+            progress(f"Sync stopped by user after {len(seen)} products; nothing was marked as removed")
+            raise JobCancelled from None
     skipped = len(getattr(api, "last_skipped", []) or [])
     # Only flag products as removed after a complete listing.
     removed = 0 if skipped else lib.mark_removed_except(seen, cfg.include_archived)

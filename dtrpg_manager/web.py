@@ -171,7 +171,7 @@ def create_app(cfg: Config, lib: Library | None = None) -> Flask:
 
         def run(log, cancel):
             with DtrpgApi(cfg.api_key, read_timeout=cfg.request_timeout) as api:
-                return sync_library(api, lib, cfg, log)
+                return sync_library(api, lib, cfg, log, cancel)
 
         return jsonify(job=jobs.start("sync", run))
 

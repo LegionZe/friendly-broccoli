@@ -269,8 +269,10 @@ class Library:
                     """INSERT INTO files (order_product_id, idx, filename, checksum, checksum_date, size, last_modified)
                        VALUES (?,?,?,?,?,?,?)
                        ON CONFLICT(order_product_id, idx) DO UPDATE SET
-                           filename=excluded.filename, checksum=excluded.checksum,
-                           checksum_date=excluded.checksum_date, size=excluded.size,
+                           filename=excluded.filename,
+                           checksum=COALESCE(excluded.checksum, files.checksum),
+                           checksum_date=COALESCE(excluded.checksum_date, files.checksum_date),
+                           size=excluded.size,
                            last_modified=excluded.last_modified""",
                     (opid, f["idx"], f["filename"], f["checksum"], f["checksum_date"], f["size"], f["last_modified"]),
                 )

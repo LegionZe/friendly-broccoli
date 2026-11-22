@@ -2,6 +2,7 @@ import hashlib
 import json
 import random
 import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -1127,3 +1128,104 @@ def test_web_hide_duplicates(cfg):
     assert c.get("/api/products").get_json()["total"] == 2
     assert c.get("/api/products?hide_duplicates=1").get_json()["total"] == 1
     assert c.get("/api/meta").get_json()["duplicates"] == {"groups": 1, "hidden": 1}
+
+
+def _paged_handler(data, seen_params, fail=None):
+    def h(request):
+        if request.url.path.endswith("/auth_key"):
+            return httpx.Response(200, json={"token": "T"})
+        p = dict(request.url.params)
+        seen_params.append(p)
+        if fail and fail(p):
+            return httpx.Response(502, text="upstream request failed")
+        size, page = int(p["pageSize"]), int(p["page"])
+        items = data[(page - 1) * size: page * size]
+        if p.get("getChecksum") == "0":  # like the real API: no checksums unless asked
+            items = [{**it, "files": [{**f, "checksums": []} for f in it.get("files", [])]} for it in items]
+        return httpx.Response(200, json=items)
+    return h
+
+
+def test_sync_skips_checksums_unless_needed(lib, cfg, tmp_path):
+    seen = []
+    api_ = DtrpgApi("K", transport=httpx.MockTransport(_paged_handler(PRODUCTS, seen)), backoff=0)
+    sync_library(api_, lib, cfg, progress=lambda m: None)
+    assert {p["getChecksum"] for p in seen} == {"0"}
+    assert lib.files_for("1")[0]["checksum"] is None
+    seen.clear()
+    cfg.validate_checksums = True                                              # strict mode needs them
+    sync_library(api_, lib, cfg, progress=lambda m: None)
+    assert {p["getChecksum"] for p in seen} == {"1"}
+    assert lib.files_for("1")[0]["checksum"] == PDF_MD5
+    cfg.validate_checksums = False                                             # later sync without them
+    sync_library(api_, lib, cfg, progress=lambda m: None)
+    assert lib.files_for("1")[0]["checksum"] == PDF_MD5                         # stored checksum kept
+
+
+def test_slow_checksum_page_falls_back_without_checksums():
+    seen = []
+    data = _many(12)
+    h = _paged_handler(data, seen, fail=lambda p: p["getChecksum"] == "1" and p["page"] == "2")
+    a = DtrpgApi("K", transport=httpx.MockTransport(h), backoff=0, retries=0)
+    msgs = []
+    got = list(a.iter_products(5, progress=msgs.append, page_retries=1, retry_wait=0, checksums=True))
+    assert len(got) == 12 and any("without checksums" in m for m in msgs)
+    assert not any("without category data" in m for m in msgs)
+
+
+def test_stop_cancels_sync(lib, cfg):
+    from dtrpg_manager.sync import JobCancelled
+    data = _many(30)
+    cancel = threading.Event()
+    seen = []
+
+    def h(request):
+        if request.url.path.endswith("/auth_key"):
+            return httpx.Response(200, json={"token": "T"})
+        p = dict(request.url.params)
+        seen.append(p)
+        if p["page"] == "2":
+            cancel.set()                                                       # user presses Stop during page 2
+        size, page = int(p["pageSize"]), int(p["page"])
+        return httpx.Response(200, json=data[(page - 1) * size: page * size])
+
+    lib.upsert_product(normalize_product(_prod(999, "Old product")), {})
+    cfg.page_size = 5
+    api_ = DtrpgApi("K", transport=httpx.MockTransport(h), backoff=0)
+    msgs = []
+    with pytest.raises(JobCancelled):
+        sync_library(api_, lib, cfg, progress=msgs.append, cancel=cancel)
+    assert len(seen) == 2                                                      # no page requested after Stop
+    assert lib.search({})["total"] == 11                                        # 10 fetched kept + old one
+    assert not lib.product("999")["removed"]                                    # incomplete: nothing removed
+    assert any("stopped by user" in m for m in msgs)
+
+
+def test_stop_button_cancels_sync_job(cfg):
+    from dtrpg_manager.web import create_app
+    import dtrpg_manager.web as web
+    lib = Library(":memory:")
+    c = create_app(cfg, lib).test_client()
+    started, saw_cancel = threading.Event(), threading.Event()
+
+    def fake_sync(api, lib_, cfg_, log, cancel=None):
+        started.set()
+        if cancel.wait(5):
+            saw_cancel.set()
+            from dtrpg_manager.sync import JobCancelled
+            raise JobCancelled
+    orig = web.sync_library
+    web.sync_library = fake_sync
+    try:
+        assert c.post("/api/sync", json={}).status_code == 200
+        started.wait(5)
+        job = c.get("/api/jobs").get_json()[0]["id"]
+        c.post(f"/api/jobs/{job}/cancel", json={})
+        assert saw_cancel.wait(5)
+        for _ in range(50):
+            if c.get("/api/jobs").get_json()[0]["state"] == "cancelled":
+                break
+            time.sleep(0.05)
+        assert c.get("/api/jobs").get_json()[0]["state"] == "cancelled"
+    finally:
+        web.sync_library = orig

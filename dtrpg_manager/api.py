@@ -33,6 +33,10 @@ RETRY_STATUSES = {429, 502, 503, 504}
 USER_AGENT = "dtrpg-manager/0.1 (+https://github.com/LegionZe/friendly-broccoli)"
 
 
+class SyncCancelled(Exception):
+    """Raised inside iter_products when the caller's cancel event is set."""
+
+
 class ApiError(Exception):
     """Raised when the DriveThruRPG API returns an unusable response."""
 
@@ -156,15 +160,21 @@ class DtrpgApi:
         return data
 
     def products_page(
-        self, page: int, page_size: int = 50, *, archived: bool = False, filters: bool = True
+        self, page: int, page_size: int = 50, *, archived: bool = False, filters: bool = True,
+        checksums: bool = False,
     ) -> Any:
-        """Return the raw JSON for one page of the customer's library."""
+        """Return the raw JSON for one page of the customer's library.
+
+        ``checksums`` is off by default: DriveThruRPG computes them slowly for some
+        products (measured 2026-11-22: ~12 s per "GameMaster's Apprentice" deck with
+        getChecksum=1, ~0.8 s without; a 50-product page went from 52.7 s to 6.4 s),
+        which pushed pages past the server's gateway limit (HTTP 502)."""
         resp = self._request(
             "GET",
             "order_products",
             retries=1,  # iter_products has its own fallback strategy
             params={
-                "getChecksum": 1,
+                "getChecksum": 1 if checksums else 0,
                 "getFilters": 1 if filters else 0,
                 "page": page,
                 "pageSize": page_size,
@@ -184,6 +194,8 @@ class DtrpgApi:
         page_retries: int = 3,
         retry_wait: float = 20.0,
         min_page: int = 5,
+        checksums: bool = False,
+        cancel: Any = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield every product, recovering from slow or failing pages.
 
@@ -210,20 +222,41 @@ class DtrpgApi:
         self.last_skipped: list[int] = []
         missing_filters = 0
 
+        def check_cancel() -> None:
+            if cancel is not None and cancel.is_set():
+                raise SyncCancelled
+
+        def pause(seconds: float) -> None:
+            if cancel is not None:
+                if cancel.wait(seconds):
+                    raise SyncCancelled
+            elif seconds:
+                time.sleep(seconds)
+
+        def get(page: int, n: int, flt: bool, chk: bool) -> list[dict[str, Any]]:
+            check_cancel()
+            return unwrap_products(self.products_page(page, n, archived=archived, filters=flt, checksums=chk))
+
         def fetch(page: int, n: int, retries: int) -> tuple[list[dict[str, Any]] | None, bool, Exception | None]:
             err = None
             for attempt in range(retries + 1):
                 try:
-                    return unwrap_products(self.products_page(page, n, archived=archived, filters=filters)), True, None
+                    return get(page, n, filters, checksums), True, None
                 except ApiError as e:
                     err = e
                     if attempt < retries:
                         wait = retry_wait * (attempt + 1)
                         say(f"Page {page} (size {n}) failed ({e}); retry {attempt + 1}/{retries} in {wait:.0f}s")
-                        time.sleep(wait)
+                        pause(wait)
+            if checksums:  # checksums are the slow part for some products
+                try:
+                    say(f"Page {page} still failing; fetching it without checksums")
+                    return get(page, n, filters, False), True, None
+                except ApiError as e:
+                    err = e
             if filters:
                 try:
-                    return unwrap_products(self.products_page(page, n, archived=archived, filters=False)), False, None
+                    return get(page, n, False, False), False, None
                 except ApiError as e:
                     err = e
             return None, False, err
